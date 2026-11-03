@@ -12,7 +12,7 @@ A pane for one project at a time, docked beside the chat: its sessions with a on
 - `/overview dump` prints what the pane holds, for checking without a screen.
 - `/overview clan` lists every project's gerbil; `/overview gerbil …` renames or recolours the selected one (see below).
 
-In the pane: the Clan card at the top picks the project by its gerbil (a project is a session's first folder under `projectsRoot`); the status glyph cycles wip → blocked → planned; `done` and `edit` sit on each row; each open issue has a `done` button; the three dim buttons prefill the prompt with the regular asks (today's progress, weekly report, UAT overview).
+In the pane: the Clan card at the top picks the project by its gerbil (a project is a session's first folder under `projectsRoot`); the status glyph cycles wip → blocked → planned; `done` and `edit` sit on each row; each open issue has a `done` button; the three dim buttons prefill the prompt with the regular asks (today's progress, weekly report, UAT overview). The Scheduled card shows only on a device that has scheduled tasks: with none, or with no scheduled-tasks server at all, it is left out and nothing is reported as an error.
 
 ## Issues file
 

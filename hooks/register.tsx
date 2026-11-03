@@ -166,11 +166,34 @@ async function callJson<T>(
     }
   }
   if (start < 0) {
-    if (emptyAs && emptyAs.when.test(text)) return emptyAs.value
+    if (emptyAs && (!text.trim() || emptyAs.when.test(text))) return emptyAs.value
     const blocks = result.content.map(b => b.type).join(',') || 'none'
     throw new Error(`${tool}: no JSON in the answer (blocks: ${blocks}): ${text.slice(0, 200) || '(empty)'}`)
   }
   return JSON.parse(body.slice(start)) as T
+}
+
+/**
+ * Whether a call failed because this device has no such MCP server (the
+ * scheduled-tasks server is not on every device): an absence, not an error.
+ * The error's words say so, or the device lists no tool of that server. A
+ * refusal (a permission rule, the auto-mode classifier) is still an error.
+ */
+async function isServerMissing($: Dollar, err: unknown, server: string): Promise<boolean> {
+  const m = errorMessage(err)
+  if (/classifier|verdict|permission|denied|not allowed/i.test(m)) return false
+  if (
+    m.toLowerCase().includes(server.toLowerCase()) &&
+    /not (connected|found|available|configured|running|installed)|unavailable|unknown|no such|disabled|does not exist/i.test(m)
+  ) {
+    return true
+  }
+  try {
+    const prefix = `mcp__${server}__`.toLowerCase()
+    return !(await $.tool.list()).some(t => t.name.toLowerCase().startsWith(prefix))
+  } catch {
+    return false
+  }
 }
 
 async function callText(
@@ -413,22 +436,35 @@ async function refresh($: Dollar, why: string): Promise<void> {
     }
     const projects = [...projectsByKey.values()].sort((a, b) => b.lastActivityMs - a.lastActivityMs)
 
+    // Scheduled tasks. A device may have none at all: the server says so in a
+    // sentence or says nothing, or the device has no scheduled-tasks server.
+    // Each reads as an empty list, not an error, and the Scheduled card hides.
     const tasks: OverviewTaskRow[] = []
     try {
-      const rawTasks = await callJson<RawTask[]>($, TASKS, 'list_scheduled_tasks', {}, {
-        when: /no scheduled tasks/i,
-        value: [],
-      })
+      let answer: RawTask[] | { tasks?: RawTask[] } = []
+      try {
+        answer = await callJson<RawTask[] | { tasks?: RawTask[] }>($, TASKS, 'list_scheduled_tasks', {}, {
+          when: /no (scheduled )?tasks|nothing (is )?scheduled/i,
+          value: [],
+        })
+      } catch (err) {
+        if (!(await isServerMissing($, err, TASKS))) throw err
+      }
+      const rawTasks: RawTask[] = Array.isArray(answer)
+        ? answer
+        : Array.isArray(answer?.tasks)
+          ? answer.tasks
+          : []
       const runsByTask: Record<string, RawRun[]> = {}
       const skillTexts: Record<string, string> = {}
-      for (const t of Array.isArray(rawTasks) ? rawTasks : []) {
+      for (const t of rawTasks) {
         try {
           const runs = await callJson<RawRun[] | { runs?: RawRun[] }>(
             $,
             TASKS,
             'list_task_runs',
             { taskId: t.taskId, limit: 3 },
-            { when: /no runs/i, value: [] },
+            { when: /no (task )?runs|never (been )?run|not (yet )?run/i, value: [] },
           )
           runsByTask[t.taskId] = Array.isArray(runs) ? runs : (runs.runs ?? [])
         } catch (err) {
@@ -445,7 +481,7 @@ async function refresh($: Dollar, why: string): Promise<void> {
       const sessionProject = Object.fromEntries(rows.map(r => [r.id, r.project]))
       tasks.push(
         ...tieTasks(
-          Array.isArray(rawTasks) ? rawTasks : [],
+          rawTasks,
           runsByTask,
           skillTexts,
           sessionProject,
@@ -790,7 +826,7 @@ export const register: Register = (on, options) => {
               x =>
                 `  ${x.status.padEnd(7)} ${fmtHours(x.hours).padStart(6)}  ${x.title} — ${x.synopsis || '(no synopsis)'}${x.isArchived ? ' [archived]' : ''}${x.doneOn ? ` done ${x.doneOn}` : ''}`,
             ),
-          `tasks: ${tasks.map(t => `${t.title} (${t.schedule})`).join('; ') || 'none for this project'}`,
+          `tasks: ${s.tasks.length === 0 ? 'none on this device' : tasks.map(t => `${t.title} (${t.schedule})`).join('; ') || 'none for this project'}`,
           `clan: ${s.projects.map(p => `${p.name}=${gerbilOf(s, p).name}/${gerbilOf(s, p).coat}`).join(', ') || 'none'}`,
           `errors: ${s.errors.join('; ') || 'none'}`,
         ]
@@ -1400,7 +1436,8 @@ export const register: Register = (on, options) => {
           ...(v.showAll ? roll.rest.map(row => sessionRow(row, true)) : []),
         ])}
 
-        {card('scheduled', [
+        {snap.tasks.length > 0 &&
+          card('scheduled', [
           heading(
             'Scheduled',
             <Text dimColor>{`${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}`}</Text>,

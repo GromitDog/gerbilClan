@@ -97,9 +97,13 @@ function standForTheApp(
   archived: string[],
   cwd = CWD,
   env: Record<string, string> = {},
-  tasksAnswer = '[]',
+  // What list_scheduled_tasks answers: text, or `{ error }` for a failed call.
+  tasksAnswer: string | { error: string } = '[]',
+  // The tools the device has: the scheduled-tasks server's unless a test takes them away.
+  tools: string[] = ['mcp__scheduled-tasks__list_scheduled_tasks', 'mcp__scheduled-tasks__list_task_runs'],
 ) {
   on('env.get', (_, e) => ({ value: env[e.name] }))
+  on('tool.list', () => ({ value: tools.map(name => ({ name, description: '', mcp: true })) }))
   on('command.register', () => ({ value: { command: 'overview' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -121,7 +125,9 @@ function standForTheApp(
       case 'list_sessions':
         return mcpAnswer(JSON.stringify(SESSIONS))
       case 'list_scheduled_tasks':
-        return mcpAnswer(tasksAnswer)
+        return typeof tasksAnswer === 'string'
+          ? mcpAnswer(tasksAnswer)
+          : { value: { content: [{ type: 'text', text: tasksAnswer.error }], isError: true } }
       case 'list_events':
         return mcpAnswer('[user] plot the TRM score on the matrix\n[assistant] Done: the matrix now plots it.')
       case 'archive_session':
@@ -260,14 +266,51 @@ test('on a Mac, ~/RiderProjects groups a session by its project folder', async (
   await ui.unmount()
 })
 
-test('an account with no scheduled tasks is quiet, not an error', async ($, on) => {
-  // The scheduled-tasks server answers an empty list with a sentence, not JSON.
-  standForTheApp(on, [], CWD, {}, 'No scheduled tasks found. Use create_scheduled_task to add one.')
+// A device with no scheduled tasks at all, each way it can say so: no Scheduled card,
+// no error, and the gerbil does not worry about reaching scheduled tasks.
+const NO_TASKS: [string, string | { error: string }, string[]?][] = [
+  ['the server answers a sentence', 'No scheduled tasks found. Use create_scheduled_task to add one.'],
+  ['the server answers an empty list', '[]'],
+  ['the server answers nothing', ''],
+  ['the server lists none in an object', JSON.stringify({ tasks: [] })],
+  ['the device has no scheduled-tasks server, and says so', { error: 'MCP server "scheduled-tasks" is not connected' }],
+  ['the device has no scheduled-tasks server, and lists none of its tools', { error: 'Something went wrong' }, []],
+]
+for (const [how, answer, tools] of NO_TASKS) {
+  test(`no scheduled tasks on the device (${how}) is quiet, not an error`, async ($, on) => {
+    standForTheApp(on, [], CWD, {}, answer, tools)
+    await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ type: 'Text', text: /^Scheduled$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /scheduled tasks:|couldn't reach|no JSON in the answer/ })).toBeUndefined()
+    const dump = await $.command.run({ command: 'overview', args: 'dump' })
+    expect(dump.text).toMatch(/tasks: none on this device/)
+    expect(dump.text).toMatch(/errors: none/)
+    await ui.unmount()
+  })
+}
+
+test('a refused or failing scheduled-tasks call on a device that has the server is still an error', async ($, on) => {
+  standForTheApp(on, [], CWD, {}, {
+    error: '$.mcp.call(scheduled-tasks, list_scheduled_tasks) refused: The server-side auto mode classifier gave no verdict',
+  })
   await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const dump = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(dump.text).toMatch(/errors: scheduled tasks: .*classifier gave no verdict/)
+  await ui.unmount()
+})
+
+test('a device whose tasks are all for other projects shows the card, empty', async ($, on) => {
+  const elsewhere = [{ taskId: 'backup', title: 'Nightly backup', schedule: 'daily at 02:00', enabled: true }]
+  standForTheApp(on, [], CWD, {}, JSON.stringify(elsewhere))
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /^Scheduled$/ }))?.text).toBe('Scheduled')
   expect(await ui.find({ type: 'Text', text: /No scheduled tasks for this project/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /couldn't reach|no JSON in the answer/ })).toBeUndefined()
   await ui.unmount()
 })
 
