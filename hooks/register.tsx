@@ -1143,48 +1143,62 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" paddingX={1} paddingY={1} gap={1}>
-        <Box flexDirection="column" gap={1}>
-          <Box gap={1} alignItems="center" justifyContent="space-between">
-            <Box gap={1} alignItems="center">
-              <Text size="caption" weight="semibold" dimColor>
-                PROJECT
-              </Text>
-              {Select ? (
-                <Select
-                  key="project"
-                  options={snap.projects.map(p => ({ value: p.key, label: p.name }))}
-                  value={project.key}
-                  onSelect={selectProject}
-                />
-              ) : (
-                <Text size="title" weight="bold">
-                  {project.name}
-                </Text>
-              )}
-            </Box>
+        {card('clan', [
+          heading(
+            'Clan',
             <Button
               key="refresh"
               plain
               dimColor
               label={snap.isRefreshing ? '⟳ refreshing…' : '⟳ refresh'}
               onPress={() => void refresh($, 'button')}
-            />
-          </Box>
-          {!Select && snap.projects.length > 1 && (
-            <Box gap={1} flexWrap="wrap">
-              {snap.projects
-                .filter(p => p.key !== project.key)
-                .map(p => (
+            />,
+          ),
+          // Every project's gerbil in its mood; picking one selects its project.
+          <Box flexWrap="wrap" gap={1}>
+            {snap.projects.map(p => {
+              const member = gerbilOf(snap, p)
+              const memberCoat = coatById(member.coat)
+              const memberMood = saysFor(p).mood
+              const isHere = p.key === project.key
+              return (
+                <Box key={`clan:${p.key}`} flexDirection="column" alignItems="center" width={13}>
+                  {Svg ? (
+                    <Svg
+                      source={gerbilSvg(memberMood, memberCoat)}
+                      alt={`${member.name}, the ${memberCoat.label} gerbil of ${p.name} (${memberMood})`}
+                      width={44}
+                      height={44}
+                    />
+                  ) : null}
                   <Button
-                    key={`project:${p.key}`}
+                    key={`clan-pick:${p.key}`}
                     plain
-                    dimColor
-                    label={p.name}
-                    onPress={() => selectProject(p.key)}
+                    dimColor={!isHere}
+                    color={isHere ? moodColor(memberMood) : undefined}
+                    label={member.name}
+                    onPress={() => {
+                      if (!isHere) selectProject(p.key)
+                    }}
                   />
-                ))}
-            </Box>
-          )}
+                  <Text size="caption" dimColor={!isHere} weight={isHere ? 'semibold' : undefined} wrap="truncate-end">
+                    {p.name}
+                  </Text>
+                </Box>
+              )
+            })}
+          </Box>,
+        ])}
+
+        <Box flexDirection="column" gap={1}>
+          <Box gap={1} alignItems="center">
+            <Text size="caption" weight="semibold" dimColor>
+              PROJECT
+            </Text>
+            <Text size="title" weight="bold">
+              {project.name}
+            </Text>
+          </Box>
           <Box gap={1} flexWrap="wrap" alignItems="center">
             <Button
               key="quick:today"
@@ -1297,7 +1311,7 @@ export const register: Register = (on, options) => {
                   {pet.name}
                 </Text>
                 <Text size="caption" dimColor>
-                  {`${coat.label} · ${gerbil.mood}`}
+                  {gerbil.mood}
                 </Text>
               </Box>
               {canEditGerbil ? (
@@ -1429,48 +1443,6 @@ export const register: Register = (on, options) => {
               )}
             </Box>
           )),
-        ])}
-
-        {card('clan', [
-          heading(
-            'Clan',
-            <Text size="caption" dimColor>
-              {`${snap.projects.length} ${snap.projects.length === 1 ? 'gerbil' : 'gerbils'} · one per project`}
-            </Text>,
-          ),
-          <Box flexWrap="wrap" gap={1}>
-            {snap.projects.map(p => {
-              const member = gerbilOf(snap, p)
-              const memberCoat = coatById(member.coat)
-              const memberMood = saysFor(p).mood
-              const isHere = p.key === project.key
-              return (
-                <Box key={`clan:${p.key}`} flexDirection="column" alignItems="center" width={13}>
-                  {Svg ? (
-                    <Svg
-                      source={gerbilSvg(memberMood, memberCoat)}
-                      alt={`${member.name}, the ${memberCoat.label} gerbil of ${p.name} (${memberMood})`}
-                      width={44}
-                      height={44}
-                    />
-                  ) : null}
-                  <Button
-                    key={`clan-pick:${p.key}`}
-                    plain
-                    dimColor={!isHere}
-                    color={isHere ? moodColor(memberMood) : undefined}
-                    label={member.name}
-                    onPress={() => {
-                      if (!isHere) selectProject(p.key)
-                    }}
-                  />
-                  <Text size="caption" dimColor wrap="truncate-end">
-                    {p.name}
-                  </Text>
-                </Box>
-              )
-            })}
-          </Box>,
         ])}
 
         {snap.errors.length > 0 &&

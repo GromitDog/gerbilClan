@@ -215,11 +215,15 @@ test('each project has its own named gerbil, renamed and recoloured in the pane'
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   // butterfield_rrt's gerbil, from the setting's default.
   expect((await ui.find({ type: 'Text', text: /^Butterscotch$/ }))?.text).toBe('Butterscotch')
-  expect(await ui.find({ type: 'Text', text: /^argente golden · / })).toBeDefined()
+  // The bubble names the gerbil and its mood, not its coat: the coat shows when choosing.
+  expect(await ui.find({ type: 'Text', text: /argente golden/ })).toBeUndefined()
 
+  // The clan picks the project: there is no project dropdown, and no Select until the gerbil is edited.
+  expect(await ui.findAll({ type: 'Select' })).toHaveLength(0)
   await ui.press({ key: 'gerbil-edit' })
+  expect((await ui.find({ key: 'gerbil-coat' }))?.props.value).toBe('argente-golden')
   await ui.select({ key: 'gerbil-coat', value: 'dove' })
-  expect(await ui.find({ type: 'Text', text: /^dove · / })).toBeDefined()
+  expect((await ui.find({ key: 'gerbil-coat' }))?.props.value).toBe('dove')
   await ui.input({ key: 'gerbil-name', text: 'Biscuit' })
   expect((await ui.find({ type: 'Text', text: /^Biscuit$/ }))?.text).toBe('Biscuit')
   await ui.press({ key: 'gerbil-edit' })
@@ -238,7 +242,8 @@ test('each project has its own named gerbil, renamed and recoloured in the pane'
   const digger = await ui.find({ type: 'Button', text: /^Digger$/ })
   expect(digger?.key).toMatch(/^clan-pick:/)
   await ui.press({ key: digger!.key! })
-  expect(await ui.find({ type: 'Text', text: /^black · / })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^Digger$/ }))?.text).toBe('Digger')
+  expect(await ui.find({ type: 'Text', text: /^Biscuit$/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -250,7 +255,8 @@ test('on a Mac, ~/RiderProjects groups a session by its project folder', async (
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   // The project is bragi, not src: its gerbil from the setting's default.
   expect((await ui.find({ type: 'Text', text: /^Skald$/ }))?.text).toBe('Skald')
-  expect(await ui.find({ type: 'Text', text: /^Burmese · / })).toBeDefined()
+  const shown = await $.command.run({ command: 'overview', args: 'gerbil' })
+  expect(shown.text).toMatch(/Skald, the Burmese gerbil, is PM for bragi/)
   await ui.unmount()
 })
 

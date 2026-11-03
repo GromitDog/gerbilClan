@@ -12,7 +12,7 @@ A pane for one project at a time, docked beside the chat: its sessions with a on
 - `/overview dump` prints what the pane holds, for checking without a screen.
 - `/overview clan` lists every project's gerbil; `/overview gerbil …` renames or recolours the selected one (see below).
 
-In the pane: the Select picks the project (a session's first folder under `projectsRoot`); the status glyph cycles wip → blocked → planned; `done` and `edit` sit on each row; each open issue has a `done` button; the three dim buttons prefill the prompt with the regular asks (today's progress, weekly report, UAT overview).
+In the pane: the Clan card at the top picks the project by its gerbil (a project is a session's first folder under `projectsRoot`); the status glyph cycles wip → blocked → planned; `done` and `edit` sit on each row; each open issue has a `done` button; the three dim buttons prefill the prompt with the regular asks (today's progress, weekly report, UAT overview).
 
 ## Issues file
 
@@ -32,7 +32,7 @@ A project with no issues file may be on Jira. The `jiraProjects` setting names t
 
 ## The gerbil clan
 
-Each project has its own gerbil PM, with a name and a coat after the colours breeders name: golden agouti, black, argente golden, argente cream, black-eyed white, dove, lilac, Burmese, Siamese, slate, nutmeg, dark-eyed honey, polar fox and pied black. Red-eyed coats wear ruby goggles; Burmese and Siamese have darker points; pied has a white blaze and spots. All of them together are the clan: the Clan card at the foot of the pane shows every project's gerbil in its current mood, and picking one selects its project.
+Each project has its own gerbil PM, with a name and a coat after the colours breeders name: golden agouti, black, argente golden, argente cream, black-eyed white, dove, lilac, Burmese, Siamese, slate, nutmeg, dark-eyed honey, polar fox and pied black. Red-eyed coats wear ruby goggles; Burmese and Siamese have darker points; pied has a white blaze and spots. All of them together are the clan: the Clan card at the top of the pane shows every project's gerbil in its current mood, and picking one selects its project: it is how the pane switches projects. The speech bubble shows the gerbil's name and mood; its coat shows only in the picker.
 
 - The `gerbils` setting names them, as `folder=Name/coat` pairs (`no-folder` for the No folder sessions). A project it leaves out is dealt a name and a coat no other project has, and keeps them.
 - `edit` beside the gerbil's name opens a name field and a coat picker; what is picked there is kept over the setting.
