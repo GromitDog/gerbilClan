@@ -89,6 +89,9 @@ const JIRA_PAGE = JSON.stringify({
   },
 })
 
+// A file system answers only absolute paths: a relative one would be read from the app's own folder.
+const absolute = (path: string) => /^([A-Za-z]:)?[\\/]/.test(path)
+
 const mcpAnswer = (text: string) => ({ value: { content: [{ type: 'text', text }], isError: false } })
 
 // Nothing sits beneath the plugin: each hook here stands for the app.
@@ -145,12 +148,12 @@ function standForTheApp(
     }
   })
   on('fs.read', (_, e) => {
-    if (String(e.path).endsWith('issues.json')) return { value: ISSUES }
+    if (absolute(String(e.path)) && String(e.path).endsWith('issues.json')) return { value: ISSUES }
     throw new Error('ENOENT: no such file or directory')
   })
   // Only butterfield_rrt has an issues file; the other project is on Jira.
   on('fs.list', (_, e) => ({
-    value: String(e.path).includes('butterfield')
+    value: absolute(String(e.path)) && String(e.path).includes('butterfield')
       ? [{ name: 'issues.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }]
       : [],
   }))
@@ -311,6 +314,19 @@ test('a device whose tasks are all for other projects shows the card, empty', as
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /^Scheduled$/ }))?.text).toBe('Scheduled')
   expect(await ui.find({ type: 'Text', text: /No scheduled tasks for this project/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on a Mac, the issues file is read from the project folder and the UAT button shows', async ($, on) => {
+  const MAC = '/Users/amy/RiderProjects/butterfield_rrt'
+  standForTheApp(on, [], MAC, { HOME: '/Users/amy' })
+  await $.session.start({ cwd: MAC, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /3 raised/ }))?.text).toBe('3 raised')
+  expect(await ui.find({ key: 'quick:uat' })).toBeDefined()
+  const dump = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(dump.text).toMatch(/^project: butterfield_rrt \[\/users\/amy\/riderprojects\/butterfield_rrt\]/)
   await ui.unmount()
 })
 

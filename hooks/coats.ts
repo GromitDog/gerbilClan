@@ -97,7 +97,7 @@ const NAMES = [
 
 /** Amy's projects as first named: folder=Name/coat, comma-separated. */
 export const DEFAULT_GERBILS =
-  'butterfield_rrt=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, ' +
+  'butterfield_rrt=Butterscotch/argente-golden, rat=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, ' +
   'bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, ' +
   'tinkerbell=Pixie/bew, no-folder=Nomad/pied'
 

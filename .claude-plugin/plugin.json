@@ -56,7 +56,7 @@
       "type": "string",
       "title": "Gerbil clan",
       "description": "The clan: each project's gerbil PM, as folder=Name/coat pairs separated by commas (no-folder for the No folder sessions). Coats: agouti, black, argente-golden, cream, bew, dove, lilac, burmese, siamese, slate, nutmeg, honey, polar-fox, pied. A project left out is dealt a name and a coat no other project has; one renamed or recoloured in the pane keeps what was picked.",
-      "default": "butterfield_rrt=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, tinkerbell=Pixie/bew, no-folder=Nomad/pied"
+      "default": "butterfield_rrt=Butterscotch/argente-golden, rat=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, tinkerbell=Pixie/bew, no-folder=Nomad/pied"
     },
     "openOnStart": {
       "type": "boolean",

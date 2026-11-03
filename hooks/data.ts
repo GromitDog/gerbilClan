@@ -137,12 +137,24 @@ export function isUnderRoot(cwd: string, root: string): boolean {
 }
 
 /** Which project a cwd belongs to: the first folder under `root`, else the folder itself. */
+/**
+ * What `segments` drops from the front of an absolute path: `/` on a Mac or
+ * Linux, `//` for a network share. A Windows path keeps its drive letter as
+ * its first segment, so it needs nothing.
+ */
+function pathRoot(path: string): string {
+  const p = path.replace(/\\/g, '/')
+  return p.startsWith('//') ? '//' : p.startsWith('/') ? '/' : ''
+}
+
 export function projectOf(cwd: string, root: string): Omit<OverviewProject, 'lastActivityMs'> {
   if (!cwd || isScratchFolder(cwd)) return { key: NO_FOLDER, name: 'No folder', cwd: '' }
   const p = segments(cwd)
   const r = segments(root)
   const own = isUnderRoot(cwd, root) ? p.slice(0, r.length + 1) : p
-  const folder = own.join('/')
+  // Absolute, as the session gave it: without its leading `/` a Mac path would be
+  // read relative to the app's own folder, and the project's issues file not found.
+  const folder = pathRoot(cwd) + own.join('/')
   return { key: folder.toLowerCase(), name: own[own.length - 1] ?? cwd, cwd: folder }
 }
 
