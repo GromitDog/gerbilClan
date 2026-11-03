@@ -1,0 +1,62 @@
+{
+  "name": "project-overview",
+  "version": "0.1.0",
+  "description": "A pane for one project at a time: its sessions with synopsis, effort and status, its issues, today's overview with carry-forward, its scheduled tasks, and a robotic gerbil PM in the middle.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "projectsRoot": {
+      "type": "string",
+      "title": "Projects root",
+      "description": "Folder whose first-level subfolders are projects; a session's cwd under it is grouped by that subfolder.",
+      "default": "C:\\Users\\amyjm\\RiderProjects"
+    },
+    "issuesFile": {
+      "type": "string",
+      "title": "Issues file",
+      "description": "Per-project issues file, relative to the project folder. Absent: the project's issues are on Jira.",
+      "default": ".claude/overview/issues.json"
+    },
+    "estimateModel": {
+      "type": "string",
+      "title": "Estimate model",
+      "description": "Model that writes each session's one-line synopsis and hours estimate (an alias such as haiku, or a full model id).",
+      "default": "haiku"
+    },
+    "refreshMinutes": {
+      "type": "number",
+      "title": "Refresh every (minutes)",
+      "description": "How often the pane re-reads sessions, tasks and issues in the background.",
+      "default": 5
+    },
+    "maxEstimatesPerRefresh": {
+      "type": "number",
+      "title": "Estimates per refresh",
+      "description": "How many sessions get a fresh synopsis/hours estimate per refresh (cost cap).",
+      "default": 4
+    },
+    "jiraProjects": {
+      "type": "string",
+      "title": "Jira projects",
+      "description": "Which Jira project a project folder's issues live in, as folder=KEY pairs separated by commas; the pane then shows the folder's open sprint. A project's issues file wins when it names a Jira project.",
+      "default": "bragi=BRAG, databasemanager=DBM, seeker=SKR, SeekerScrapers=SKR"
+    },
+    "jiraCloudId": {
+      "type": "string",
+      "title": "Jira cloud id",
+      "description": "The Atlassian site the Jira projects are on: its cloud id, or its hostname such as cortexgg.atlassian.net.",
+      "default": "9ce04f13-82f3-4067-bc19-3027caf13167"
+    },
+    "jiraServer": {
+      "type": "string",
+      "title": "Jira MCP server",
+      "description": "The key of the Atlassian connector's MCP server in this app (the part between mcp__ and __ in its tool names).",
+      "default": "a42b580c-4d22-425e-906d-bc95104ad94d"
+    },
+    "openOnStart": {
+      "type": "boolean",
+      "title": "Open at session start",
+      "description": "Open the pane when a session starts (it docks beside the chat when the window is wide enough).",
+      "default": true
+    }
+  }
+}

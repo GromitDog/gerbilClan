@@ -1,0 +1,2 @@
+# The mod runs straight from this folder on Windows and macOS: keep LF everywhere.
+* text=auto eol=lf
