@@ -143,6 +143,9 @@ async function callJson<T>(
   server: string,
   tool: string,
   args: Record<string, unknown> = {},
+  // Some tools answer an empty list with a sentence instead of JSON (the scheduled-tasks
+  // server: "No scheduled tasks found. Use create_scheduled_task..."): that is `value`, not an error.
+  emptyAs?: { when: RegExp; value: T },
 ): Promise<T> {
   const result = await $.mcp.call(server, tool, args)
   const text = mcpText(result)
@@ -163,6 +166,7 @@ async function callJson<T>(
     }
   }
   if (start < 0) {
+    if (emptyAs && emptyAs.when.test(text)) return emptyAs.value
     const blocks = result.content.map(b => b.type).join(',') || 'none'
     throw new Error(`${tool}: no JSON in the answer (blocks: ${blocks}): ${text.slice(0, 200) || '(empty)'}`)
   }
@@ -411,15 +415,21 @@ async function refresh($: Dollar, why: string): Promise<void> {
 
     const tasks: OverviewTaskRow[] = []
     try {
-      const rawTasks = await callJson<RawTask[]>($, TASKS, 'list_scheduled_tasks')
+      const rawTasks = await callJson<RawTask[]>($, TASKS, 'list_scheduled_tasks', {}, {
+        when: /no scheduled tasks/i,
+        value: [],
+      })
       const runsByTask: Record<string, RawRun[]> = {}
       const skillTexts: Record<string, string> = {}
       for (const t of Array.isArray(rawTasks) ? rawTasks : []) {
         try {
-          const runs = await callJson<RawRun[] | { runs?: RawRun[] }>($, TASKS, 'list_task_runs', {
-            taskId: t.taskId,
-            limit: 3,
-          })
+          const runs = await callJson<RawRun[] | { runs?: RawRun[] }>(
+            $,
+            TASKS,
+            'list_task_runs',
+            { taskId: t.taskId, limit: 3 },
+            { when: /no runs/i, value: [] },
+          )
           runsByTask[t.taskId] = Array.isArray(runs) ? runs : (runs.runs ?? [])
         } catch (err) {
           errors.push(`runs of ${t.title ?? t.taskId}: ${errorMessage(err)}`)

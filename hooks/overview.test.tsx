@@ -97,6 +97,7 @@ function standForTheApp(
   archived: string[],
   cwd = CWD,
   env: Record<string, string> = {},
+  tasksAnswer = '[]',
 ) {
   on('env.get', (_, e) => ({ value: env[e.name] }))
   on('command.register', () => ({ value: { command: 'overview' } }))
@@ -120,7 +121,7 @@ function standForTheApp(
       case 'list_sessions':
         return mcpAnswer(JSON.stringify(SESSIONS))
       case 'list_scheduled_tasks':
-        return mcpAnswer('[]')
+        return mcpAnswer(tasksAnswer)
       case 'list_events':
         return mcpAnswer('[user] plot the TRM score on the matrix\n[assistant] Done: the matrix now plots it.')
       case 'archive_session':
@@ -250,6 +251,17 @@ test('on a Mac, ~/RiderProjects groups a session by its project folder', async (
   // The project is bragi, not src: its gerbil from the setting's default.
   expect((await ui.find({ type: 'Text', text: /^Skald$/ }))?.text).toBe('Skald')
   expect(await ui.find({ type: 'Text', text: /^Burmese · / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an account with no scheduled tasks is quiet, not an error', async ($, on) => {
+  // The scheduled-tasks server answers an empty list with a sentence, not JSON.
+  standForTheApp(on, [], CWD, {}, 'No scheduled tasks found. Use create_scheduled_task to add one.')
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /No scheduled tasks for this project/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /couldn't reach|no JSON in the answer/ })).toBeUndefined()
   await ui.unmount()
 })
 
