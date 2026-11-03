@@ -100,6 +100,30 @@ function segments(path: string): string[] {
 
 export const NO_FOLDER = 'no-folder'
 
+/**
+ * The projects roots a setting names, separated by `;` or new lines; a root
+ * starting with `~` is under the home folder. Never empty: with no home
+ * folder known, the roots that need one are left out, and the text itself
+ * stands if nothing is left.
+ */
+export function parseRoots(text: string, home: string | undefined): string[] {
+  const roots = text
+    .split(/[;\n]/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(r => {
+      if (r !== '~' && !r.startsWith('~/') && !r.startsWith('~\\')) return r
+      return home ? home.replace(/[\\/]+$/, '') + r.slice(1) : ''
+    })
+    .filter(Boolean)
+  return roots.length ? roots : [text.trim()]
+}
+
+/** The root a cwd lies under, else the first: `projectOf` groups by it. */
+export function rootFor(cwd: string, roots: readonly string[]): string {
+  return roots.find(r => isUnderRoot(cwd, r)) ?? roots[0] ?? ''
+}
+
 /** The app's scratch workspaces ("No folder" sessions) form one pseudo-project with no cwd. */
 export function isScratchFolder(cwd: string): boolean {
   return segments(cwd).some(seg => seg.toLowerCase() === 'scratch-workspaces')

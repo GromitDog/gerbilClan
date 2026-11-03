@@ -104,12 +104,28 @@ export type OverviewSnapshot = {
   errors: string[]
   /** The session id whose synopsis is being estimated now, if any. */
   estimating: string | null
+  /** Each project's gerbil PM, by project key. */
+  gerbils: Record<string, OverviewGerbil>
+}
+
+/**
+ * A project's gerbil: its name and coat (an id from hooks/coats.ts). `manual`:
+ * picked in the pane or by command, and kept; `config`: from the `gerbils`
+ * setting; `auto`: dealt out when the project first appeared.
+ */
+export type OverviewGerbil = {
+  name: string
+  coat: string
+  source: 'manual' | 'config' | 'auto'
 }
 
 export type OverviewView = {
   /** Selected project key; null until the first refresh picks one. */
   project: string | null
-  /** The session row whose hours are being edited, if any. */
+  /**
+   * What is being edited: a session row's id (its hours), or `gerbil:<project
+   * key>` (that project's gerbil's name and coat); null for nothing.
+   */
   editing: string | null
   /** Show every session of the project, not only today's and carried-forward ones. */
   showAll: boolean

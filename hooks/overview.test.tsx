@@ -92,7 +92,13 @@ const JIRA_PAGE = JSON.stringify({
 const mcpAnswer = (text: string) => ({ value: { content: [{ type: 'text', text }], isError: false } })
 
 // Nothing sits beneath the plugin: each hook here stands for the app.
-function standForTheApp(on: Parameters<Parameters<typeof test>[1]>[1], archived: string[], cwd = CWD) {
+function standForTheApp(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  archived: string[],
+  cwd = CWD,
+  env: Record<string, string> = {},
+) {
+  on('env.get', (_, e) => ({ value: env[e.name] }))
   on('command.register', () => ({ value: { command: 'overview' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -198,6 +204,52 @@ test('a project on Jira shows its open sprint', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /single cadastre/ })).toBeDefined()
   // Jira issues are read here, not closed: no done button on the row.
   expect(await ui.find({ key: 'issue-done:SKR-919' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('each project has its own named gerbil, renamed and recoloured in the pane', async ($, on) => {
+  standForTheApp(on, [])
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // butterfield_rrt's gerbil, from the setting's default.
+  expect((await ui.find({ type: 'Text', text: /^Butterscotch$/ }))?.text).toBe('Butterscotch')
+  expect(await ui.find({ type: 'Text', text: /^argente golden · / })).toBeDefined()
+
+  await ui.press({ key: 'gerbil-edit' })
+  await ui.select({ key: 'gerbil-coat', value: 'dove' })
+  expect(await ui.find({ type: 'Text', text: /^dove · / })).toBeDefined()
+  await ui.input({ key: 'gerbil-name', text: 'Biscuit' })
+  expect((await ui.find({ type: 'Text', text: /^Biscuit$/ }))?.text).toBe('Biscuit')
+  await ui.press({ key: 'gerbil-edit' })
+  expect(await ui.find({ key: 'gerbil-coat' })).toBeUndefined()
+
+  // The command reads the same gerbil, and a coat by a breeder's other name.
+  const shown = await $.command.run({ command: 'overview', args: 'gerbil' })
+  expect(shown.text).toMatch(/Biscuit, the dove gerbil/)
+  const recoloured = await $.command.run({ command: 'overview', args: 'gerbil coat black-eyed white' })
+  expect(recoloured.text).toMatch(/Biscuit, the black-eyed white gerbil/)
+
+  // The clan: every project's gerbil, SeekerScrapers' Digger among them; picking one selects its project.
+  const clan = await $.command.run({ command: 'overview', args: 'clan' })
+  expect(clan.text).toMatch(/Biscuit\s+black-eyed white\s+butterfield_rrt/)
+  expect(clan.text).toMatch(/Digger\s+black\s+SeekerScrapers/)
+  const digger = await ui.find({ type: 'Button', text: /^Digger$/ })
+  expect(digger?.key).toMatch(/^clan-pick:/)
+  await ui.press({ key: digger!.key! })
+  expect(await ui.find({ type: 'Text', text: /^black · / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on a Mac, ~/RiderProjects groups a session by its project folder', async ($, on) => {
+  const MAC = '/Users/amy/RiderProjects/bragi/src'
+  standForTheApp(on, [], MAC, { HOME: '/Users/amy' })
+  await $.session.start({ cwd: MAC, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The project is bragi, not src: its gerbil from the setting's default.
+  expect((await ui.find({ type: 'Text', text: /^Skald$/ }))?.text).toBe('Skald')
+  expect(await ui.find({ type: 'Text', text: /^Burmese · / })).toBeDefined()
   await ui.unmount()
 })
 

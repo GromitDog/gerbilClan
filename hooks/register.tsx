@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, Timer } from 'claude-code'
 
 import type {
+  OverviewGerbil,
   OverviewIssue,
   OverviewIssues,
   OverviewProject,
@@ -32,9 +33,11 @@ import {
   parseIssuesFile,
   parseJiraMap,
   parseJiraSearch,
+  parseRoots,
   previousDay,
   projectOf,
   rollup,
+  rootFor,
   serializeIssuesFile,
   sprintCounts,
   startOfWeek,
@@ -47,6 +50,14 @@ import {
   type SessionRecord,
 } from './data'
 import { ESTIMATE_SYSTEM, buildEstimatePrompt, parseEstimate } from './estimate'
+import {
+  COATS,
+  DEFAULT_GERBILS,
+  assignGerbils,
+  coatById,
+  findCoat,
+  parseGerbilMap,
+} from './coats'
 import { gerbilSays } from './gerbil'
 import { gerbilAscii, gerbilSvg, moodColor } from './gerbil-svg'
 
@@ -65,12 +76,13 @@ const EMPTY_SNAPSHOT: OverviewSnapshot = {
   issues: {},
   errors: [],
   estimating: null,
+  gerbils: {},
 }
 
 // Bump a shape tag when the value's fields change: a reload then starts over
 // instead of reading what the old code stored.
 const snapshot = atom({ plugin: 'project-overview', key: 'snapshot' } as const, EMPTY_SNAPSHOT, {
-  shape: 'snapshot-2',
+  shape: 'snapshot-3',
 })
 const view = atom(
   { plugin: 'project-overview', key: 'view' } as const,
@@ -88,6 +100,7 @@ type Options = {
   jiraServer: string
   jiraCloudId: string
   jiraProjects: string
+  gerbils: string
 }
 
 function readOptions(o: PluginOptions): Options {
@@ -96,7 +109,7 @@ function readOptions(o: PluginOptions): Options {
   const num = (key: string, fallback: number) =>
     typeof o[key] === 'number' && Number.isFinite(o[key]) ? Number(o[key]) : fallback
   return {
-    projectsRoot: text('projectsRoot', 'C:\\Users\\amyjm\\RiderProjects'),
+    projectsRoot: text('projectsRoot', 'C:\\Users\\amyjm\\RiderProjects; ~/RiderProjects'),
     issuesFile: text('issuesFile', '.claude/overview/issues.json'),
     estimateModel: text('estimateModel', 'haiku'),
     refreshMinutes: num('refreshMinutes', 5),
@@ -105,6 +118,7 @@ function readOptions(o: PluginOptions): Options {
     jiraServer: text('jiraServer', 'a42b580c-4d22-425e-906d-bc95104ad94d'),
     jiraCloudId: text('jiraCloudId', '9ce04f13-82f3-4067-bc19-3027caf13167'),
     jiraProjects: text('jiraProjects', 'bragi=BRAG, databasemanager=DBM, seeker=SKR, SeekerScrapers=SKR'),
+    gerbils: text('gerbils', DEFAULT_GERBILS),
   }
 }
 
@@ -116,6 +130,13 @@ let timer: Timer | null = null
 let refreshing = false
 let refreshQueued = false
 let selfId = ''
+// The projects roots, `~` expanded once the home folder is read at session start.
+let roots: string[] = parseRoots(opts.projectsRoot, undefined)
+
+/** The project a cwd belongs to, under whichever projects root holds it. */
+function projectAt(cwd: string) {
+  return projectOf(cwd, rootFor(cwd, roots))
+}
 
 async function callJson<T>(
   $: Dollar,
@@ -179,6 +200,43 @@ async function saveRecord(
     ...s,
     sessions: s.sessions.map(row => (row.id === id ? applyRecord(row, next) : row)),
   }))
+  return next
+}
+
+/** The gerbils dealt or picked so far, by project key (projects not seen lately included). */
+async function loadGerbils($: Dollar): Promise<Record<string, OverviewGerbil>> {
+  const value = await $.store.get('gerbils')
+  return value && typeof value === 'object' ? (value as Record<string, OverviewGerbil>) : {}
+}
+
+/** The gerbil a project has now: the snapshot's, or worked out the way a refresh would. */
+function gerbilOf(s: OverviewSnapshot, project: OverviewProject): OverviewGerbil {
+  return (
+    s.gerbils[project.key] ??
+    assignGerbils([project], {}, parseGerbilMap(opts.gerbils))[project.key] ?? {
+      name: 'Gerbil',
+      coat: 'agouti',
+      source: 'auto',
+    }
+  )
+}
+
+/** Renames or recolours a project's gerbil; what Amy picks is kept over the setting. */
+async function saveGerbil(
+  $: Dollar,
+  project: OverviewProject,
+  change: { name?: string; coat?: string },
+): Promise<OverviewGerbil> {
+  const s = await read($, snapshot)
+  const now = gerbilOf(s, project)
+  const next: OverviewGerbil = {
+    name: change.name?.trim().slice(0, 24) || now.name,
+    coat: change.coat ?? now.coat,
+    source: 'manual',
+  }
+  const stored = await loadGerbils($)
+  await $.store.set('gerbils', { ...stored, [project.key]: next })
+  await update($, snapshot, cur => ({ ...cur, gerbils: { ...cur.gerbils, [project.key]: next } }))
   return next
 }
 
@@ -307,7 +365,7 @@ async function refresh($: Dollar, why: string): Promise<void> {
     const projectsByKey = new Map<string, OverviewProject>()
     const rows: OverviewSessionRow[] = []
     for (const s of raw) {
-      const p = projectOf(s.cwd || selfCwd, opts.projectsRoot)
+      const p = projectAt(s.cwd || selfCwd)
       const ms = Date.parse(s.lastActivityAt ?? '') || 0
       const known = projectsByKey.get(p.key)
       if (!known) projectsByKey.set(p.key, { ...p, lastActivityMs: ms })
@@ -331,7 +389,7 @@ async function refresh($: Dollar, why: string): Promise<void> {
     const todayKey = dayKey(now)
     for (const [id, rec] of Object.entries(records)) {
       if (rec.doneOn !== todayKey || !rec.kept || rows.some(r => r.id === id)) continue
-      const p = projectOf(rec.kept.cwd || selfCwd, opts.projectsRoot)
+      const p = projectAt(rec.kept.cwd || selfCwd)
       const ms = Date.parse(rec.kept.lastActivityAt) || 0
       if (!projectsByKey.has(p.key)) projectsByKey.set(p.key, { ...p, lastActivityMs: ms })
       const base: OverviewSessionRow = {
@@ -397,11 +455,11 @@ async function refresh($: Dollar, why: string): Promise<void> {
       // A default is a real project folder: never the app's "No folder" scratch workspaces.
       const defaultable = (key: string | undefined | null): key is string => {
         const p = key ? projectsByKey.get(key) : undefined
-        return !!p && p.cwd !== '' && isUnderRoot(p.cwd, opts.projectsRoot)
+        return !!p && p.cwd !== '' && roots.some(r => isUnderRoot(p.cwd, r))
       }
       const stored = (await $.store.get('view')) as { project?: string } | undefined
       const storedKey = stored?.project
-      const own = projectOf(selfCwd, opts.projectsRoot).key
+      const own = projectAt(selfCwd).key
       selected = defaultable(storedKey)
         ? storedKey
         : defaultable(own)
@@ -424,6 +482,14 @@ async function refresh($: Dollar, why: string): Promise<void> {
       issues[selected] = await readJiraSprint($, selectedSet, selectedSet.jira.projectKey)
     }
 
+    // Each project's gerbil: picked, set, or dealt once and then kept.
+    const storedGerbils = await loadGerbils($)
+    const gerbils = assignGerbils(projects, storedGerbils, parseGerbilMap(opts.gerbils))
+    const keptGerbils = { ...storedGerbils, ...gerbils }
+    if (JSON.stringify(keptGerbils) !== JSON.stringify(storedGerbils)) {
+      await $.store.set('gerbils', keptGerbils)
+    }
+
     await update($, snapshot, s => ({
       ...s,
       at: now,
@@ -433,6 +499,7 @@ async function refresh($: Dollar, why: string): Promise<void> {
       tasks,
       issues,
       errors,
+      gerbils,
     }))
 
     if (selected) {
@@ -627,13 +694,21 @@ function quickPrompt(kind: 'today' | 'weekly' | 'uat', project: string): string 
 
 export const register: Register = (on, options) => {
   opts = readOptions(options)
+  roots = parseRoots(opts.projectsRoot, undefined)
 
   on('session.start', async ($, e, next) => {
+    // `~` in the projects roots: the home folder (USERPROFILE on Windows, HOME on a Mac).
+    try {
+      const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+      roots = parseRoots(opts.projectsRoot, home)
+    } catch {
+      roots = parseRoots(opts.projectsRoot, undefined)
+    }
     await $.command.register({
       name: 'overview',
       description:
-        'Project overview pane: open, refresh, all, dump, done <session id>, backdate <session id>',
-      argumentHint: '[open|refresh|all|dump|done <id>|backdate <id>]',
+        'Project overview pane: open, refresh, all, dump, done <session id>, backdate <session id>, clan, gerbil [name <Name>|coat <coat>|coats|reset]',
+      argumentHint: '[open|refresh|all|dump|done <id>|backdate <id>|clan|gerbil …]',
     })
     if (opts.openOnStart) void $.ui.open({ id: PANE, title: TITLE })
     void refresh($, 'start')
@@ -706,13 +781,65 @@ export const register: Register = (on, options) => {
                 `  ${x.status.padEnd(7)} ${fmtHours(x.hours).padStart(6)}  ${x.title} — ${x.synopsis || '(no synopsis)'}${x.isArchived ? ' [archived]' : ''}${x.doneOn ? ` done ${x.doneOn}` : ''}`,
             ),
           `tasks: ${tasks.map(t => `${t.title} (${t.schedule})`).join('; ') || 'none for this project'}`,
+          `clan: ${s.projects.map(p => `${p.name}=${gerbilOf(s, p).name}/${gerbilOf(s, p).coat}`).join(', ') || 'none'}`,
           `errors: ${s.errors.join('; ') || 'none'}`,
         ]
         return { text: lines.join('\n') }
       }
+      case 'clan': {
+        // Every project's gerbil.
+        const s = await read($, snapshot)
+        if (!s.projects.length) return { text: 'No clan yet: try again after the first refresh.' }
+        return {
+          text: [
+            `The clan, ${s.projects.length} gerbils:`,
+            ...s.projects.map(p => {
+              const g = gerbilOf(s, p)
+              return `  ${g.name.padEnd(14)} ${coatById(g.coat).label.padEnd(17)} ${p.name}`
+            }),
+          ].join('\n'),
+        }
+      }
+      case 'gerbil': {
+        // The selected project's gerbil: show it, rename it, recolour it, or hand it back to the setting.
+        const s = await read($, snapshot)
+        const v = await read($, view)
+        const project = s.projects.find(p => p.key === v.project) ?? s.projects[0]
+        const coats = COATS.map(c => c.id).join(', ')
+        if (!project) return { text: 'No project yet: try again after the first refresh.' }
+        const [what = '', ...words] = rest
+        const value = words.join(' ')
+        const say = (g: OverviewGerbil) =>
+          `${g.name}, the ${coatById(g.coat).label} gerbil, is PM for ${project.name}.`
+        switch (what) {
+          case '':
+            return {
+              text: `${say(gerbilOf(s, project))} Change it with /overview gerbil name <Name> or /overview gerbil coat <coat>.`,
+            }
+          case 'coats':
+            return { text: `Coats: ${COATS.map(c => `${c.id} (${c.label})`).join(', ')}.` }
+          case 'name':
+            if (!value) return { text: 'Usage: /overview gerbil name <Name>' }
+            return { text: say(await saveGerbil($, project, { name: value })) }
+          case 'coat': {
+            const coat = findCoat(value)
+            if (!coat) return { text: `No coat "${value}". Coats: ${coats}.` }
+            return { text: say(await saveGerbil($, project, { coat: coat.id })) }
+          }
+          case 'reset': {
+            const stored = await loadGerbils($)
+            delete stored[project.key]
+            await $.store.set('gerbils', stored)
+            await refresh($, 'command')
+            return { text: say(gerbilOf(await read($, snapshot), project)) }
+          }
+          default:
+            return { text: 'Usage: /overview gerbil [name <Name>|coat <coat>|coats|reset]' }
+        }
+      }
       default:
         return {
-          text: `Unknown "${verb}". Use open, refresh, all, dump, done <id> or backdate <id>.`,
+          text: `Unknown "${verb}". Use open, refresh, all, dump, done <id>, backdate <id>, clan or gerbil.`,
         }
     }
   })
@@ -755,22 +882,37 @@ export const register: Register = (on, options) => {
     const open = issues ? openIssues(issues) : []
     const tasks = snap.tasks.filter(t => t.projects.includes(project.key))
     const weekStart = startOfWeek(now)
-    const gerbil = gerbilSays({
-      projectName: project.name,
-      errors: snap.errors,
-      tasks,
-      issues,
-      today: roll.today,
-      carried: roll.carried,
-      hoursToday: roll.hoursToday,
-      doneToday: roll.doneToday,
-      hasWeeklyReportThisWeek: rows.some(
-        r => /weekly (status|report)/i.test(r.title) && Date.parse(r.lastActivityAt) >= weekStart,
-      ),
-      weekday: new Date(now).getDay(),
-      nowMs: now,
-      sprint: sprint && counts ? { name: sprint.name, endDate: sprint.endDate, open: counts.open } : undefined,
-    })
+
+    // What a project's gerbil says, by the same rules for every member of the clan
+    // (another project's Jira sprint is read only once it is selected).
+    const saysFor = (p: OverviewProject) => {
+      const pRows = p.key === project.key ? rows : snap.sessions.filter(r => r.project === p.key)
+      const pRoll = p.key === project.key ? roll : rollup(pRows, today)
+      const set = snap.issues[p.key]
+      const pSprint = set?.kind === 'jira' ? set.jira?.sprint : undefined
+      const pIssues = set && (set.kind === 'file' || pSprint) ? set.issues : null
+      const pCounts = !pIssues ? null : pSprint ? sprintCounts(pSprint, pIssues) : issueCounts(pIssues)
+      return gerbilSays({
+        projectName: p.name,
+        errors: snap.errors,
+        tasks: snap.tasks.filter(t => t.projects.includes(p.key)),
+        issues: pIssues,
+        today: pRoll.today,
+        carried: pRoll.carried,
+        hoursToday: pRoll.hoursToday,
+        doneToday: pRoll.doneToday,
+        hasWeeklyReportThisWeek: pRows.some(
+          r => /weekly (status|report)/i.test(r.title) && Date.parse(r.lastActivityAt) >= weekStart,
+        ),
+        weekday: new Date(now).getDay(),
+        nowMs: now,
+        sprint:
+          pSprint && pCounts
+            ? { name: pSprint.name, endDate: pSprint.endDate, open: pCounts.open }
+            : undefined,
+      })
+    }
+    const gerbil = saysFor(project)
 
     const selectProject = (key: string) => {
       void update($, view, cur => ({ ...cur, project: key, editing: null }))
@@ -981,6 +1123,11 @@ export const register: Register = (on, options) => {
 
     const showUat = !!issues && issues.some(i => /^UAT/i.test(i.key))
     const mood = moodColor(gerbil.mood)
+    const pet = gerbilOf(snap, project)
+    const coat = coatById(pet.coat)
+    const gerbilKey = `gerbil:${project.key}`
+    const editingGerbil = v.editing === gerbilKey
+    const canEditGerbil = !!(Input || Select)
     const wip = roll.carried.filter(r => r.status === 'wip').length
     const blocked = roll.carried.filter(r => r.status === 'blocked').length
 
@@ -1119,8 +1266,8 @@ export const register: Register = (on, options) => {
         <Box justifyContent="center" alignItems="center" gap={2} paddingY={1}>
           {Svg ? (
             <Svg
-              source={gerbilSvg(gerbil.mood)}
-              alt={`Gerbil PM (${gerbil.mood}): ${gerbil.line}`}
+              source={gerbilSvg(gerbil.mood, coat)}
+              alt={`${pet.name}, the ${coat.label} gerbil PM (${gerbil.mood}): ${gerbil.line}`}
               width={96}
               height={96}
             />
@@ -1134,10 +1281,53 @@ export const register: Register = (on, options) => {
             paddingX={1}
             width={Math.min(52, cols - 20)}
           >
-            <Text size="caption" weight="semibold" color={mood}>
-              {`Gerbil PM · ${gerbil.mood}`}
-            </Text>
+            <Box gap={1} alignItems="center" justifyContent="space-between">
+              <Box gap={1} alignItems="center">
+                <Text weight="semibold" color={mood}>
+                  {pet.name}
+                </Text>
+                <Text size="caption" dimColor>
+                  {`${coat.label} · ${gerbil.mood}`}
+                </Text>
+              </Box>
+              {canEditGerbil ? (
+                <Button
+                  key="gerbil-edit"
+                  plain
+                  dimColor
+                  label={editingGerbil ? 'done' : 'edit'}
+                  onPress={() =>
+                    void update($, view, cur => ({ ...cur, editing: editingGerbil ? null : gerbilKey }))
+                  }
+                />
+              ) : null}
+            </Box>
             <Text wrap="wrap">{gerbil.line}</Text>
+            {editingGerbil ? (
+              <Box flexDirection="column" gap={1}>
+                {Input ? (
+                  <Input
+                    key="gerbil-name"
+                    label="name"
+                    placeholder={pet.name}
+                    value={pet.name}
+                    autoFocus
+                    onSubmit={value => {
+                      if (value.trim()) void saveGerbil($, project, { name: value })
+                    }}
+                  />
+                ) : null}
+                {Select ? (
+                  <Select
+                    key="gerbil-coat"
+                    label="coat"
+                    options={COATS.map(c => ({ value: c.id, label: c.label }))}
+                    value={coat.id}
+                    onSelect={id => void saveGerbil($, project, { coat: id })}
+                  />
+                ) : null}
+              </Box>
+            ) : null}
           </Box>
         </Box>
 
@@ -1229,6 +1419,48 @@ export const register: Register = (on, options) => {
               )}
             </Box>
           )),
+        ])}
+
+        {card('clan', [
+          heading(
+            'Clan',
+            <Text size="caption" dimColor>
+              {`${snap.projects.length} ${snap.projects.length === 1 ? 'gerbil' : 'gerbils'} · one per project`}
+            </Text>,
+          ),
+          <Box flexWrap="wrap" gap={1}>
+            {snap.projects.map(p => {
+              const member = gerbilOf(snap, p)
+              const memberCoat = coatById(member.coat)
+              const memberMood = saysFor(p).mood
+              const isHere = p.key === project.key
+              return (
+                <Box key={`clan:${p.key}`} flexDirection="column" alignItems="center" width={13}>
+                  {Svg ? (
+                    <Svg
+                      source={gerbilSvg(memberMood, memberCoat)}
+                      alt={`${member.name}, the ${memberCoat.label} gerbil of ${p.name} (${memberMood})`}
+                      width={44}
+                      height={44}
+                    />
+                  ) : null}
+                  <Button
+                    key={`clan-pick:${p.key}`}
+                    plain
+                    dimColor={!isHere}
+                    color={isHere ? moodColor(memberMood) : undefined}
+                    label={member.name}
+                    onPress={() => {
+                      if (!isHere) selectProject(p.key)
+                    }}
+                  />
+                  <Text size="caption" dimColor wrap="truncate-end">
+                    {p.name}
+                  </Text>
+                </Box>
+              )
+            })}
+          </Box>,
         ])}
 
         {snap.errors.length > 0 &&

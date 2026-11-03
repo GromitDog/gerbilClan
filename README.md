@@ -10,6 +10,7 @@ A pane for one project at a time, docked beside the chat: its sessions with a on
 - `/overview done <session id>` marks a session done (it stays in Today until midnight, then drops out) and archives it; the app asks before archiving.
 - `/overview backdate <session id>` sets a done session's day to yesterday, to watch the rollover.
 - `/overview dump` prints what the pane holds, for checking without a screen.
+- `/overview clan` lists every project's gerbil; `/overview gerbil …` renames or recolours the selected one (see below).
 
 In the pane: the Select picks the project (a session's first folder under `projectsRoot`); the status glyph cycles wip → blocked → planned; `done` and `edit` sit on each row; each open issue has a `done` button; the three dim buttons prefill the prompt with the regular asks (today's progress, weekly report, UAT overview).
 
@@ -29,6 +30,14 @@ Marking an issue done writes `state: "closed"` and `closedOn` back.
 
 A project with no issues file may be on Jira. The `jiraProjects` setting names the Jira project per folder (`bragi=BRAG, seeker=SKR`), or the issues file does with only `{ "jira": { "projectKey": "SKR" } }`. The pane then reads the project's open sprint through the Atlassian connector: a count of the sprint, and its open issues (up to 20, highest priority first) with the key linked to Jira. The Issues card becomes `Sprint <name>` with `N issues · M open`, the bar shows done against open, and the gerbil worries when the sprint's end date has passed. Jira issues are read only; closing them stays in Jira. A project with neither a file nor a Jira key reads `on Jira`.
 
+## The gerbil clan
+
+Each project has its own gerbil PM, with a name and a coat after the colours breeders name: golden agouti, black, argente golden, argente cream, black-eyed white, dove, lilac, Burmese, Siamese, slate, nutmeg, dark-eyed honey, polar fox and pied black. Red-eyed coats wear ruby goggles; Burmese and Siamese have darker points; pied has a white blaze and spots. All of them together are the clan: the Clan card at the foot of the pane shows every project's gerbil in its current mood, and picking one selects its project.
+
+- The `gerbils` setting names them, as `folder=Name/coat` pairs (`no-folder` for the No folder sessions). A project it leaves out is dealt a name and a coat no other project has, and keeps them.
+- `edit` beside the gerbil's name opens a name field and a coat picker; what is picked there is kept over the setting.
+- `/overview clan` lists the clan; `/overview gerbil` names the selected project's gerbil; `/overview gerbil name <Name>` and `/overview gerbil coat <coat>` change it (`/overview gerbil coats` lists the coats); `/overview gerbil reset` hands it back to the setting.
+
 ## Loading it in every session
 
 The mod lives at `C:\Users\amyjm\.claude\mods\project-overview`. A desktop session takes no `--plugin-dir` flag, so name the folder in the `env` block of `~/.claude/settings.json`; it is read when a session starts, and the folder is then watched, so saving a file reloads the mod:
@@ -41,7 +50,9 @@ Check with `claude plugin validate` and `claude plugin test` on the folder, usin
 
 ## Settings
 
-`projectsRoot`, `issuesFile`, `estimateModel`, `refreshMinutes`, `maxEstimatesPerRefresh`, `openOnStart` — see `.claude-plugin/plugin.json`.
+`projectsRoot`, `issuesFile`, `estimateModel`, `refreshMinutes`, `maxEstimatesPerRefresh`, `jiraProjects`, `gerbils`, `openOnStart` — see `.claude-plugin/plugin.json`.
+
+`projectsRoot` takes several folders separated by semicolons, and `~` is the home folder (`USERPROFILE` on Windows, `HOME` on a Mac). Its default, `C:\Users\amyjm\RiderProjects; ~/RiderProjects`, serves the Windows machine and a Mac whose projects are in `~/RiderProjects`, so the same files run on both. On a Mac whose projects are elsewhere, set it in the mod's settings (`pluginConfigs` → `project-overview` → `options` in `~/.claude/settings.json`).
 
 ## Permissions
 

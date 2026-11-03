@@ -7,8 +7,8 @@
     "projectsRoot": {
       "type": "string",
       "title": "Projects root",
-      "description": "Folder whose first-level subfolders are projects; a session's cwd under it is grouped by that subfolder.",
-      "default": "C:\\Users\\amyjm\\RiderProjects"
+      "description": "Folders whose first-level subfolders are projects, separated by semicolons; ~ is the home folder, so one setting serves Windows and a Mac. A session's cwd under one of them is grouped by that subfolder.",
+      "default": "C:\\Users\\amyjm\\RiderProjects; ~/RiderProjects"
     },
     "issuesFile": {
       "type": "string",
@@ -51,6 +51,12 @@
       "title": "Jira MCP server",
       "description": "The key of the Atlassian connector's MCP server in this app (the part between mcp__ and __ in its tool names).",
       "default": "a42b580c-4d22-425e-906d-bc95104ad94d"
+    },
+    "gerbils": {
+      "type": "string",
+      "title": "Gerbil clan",
+      "description": "The clan: each project's gerbil PM, as folder=Name/coat pairs separated by commas (no-folder for the No folder sessions). Coats: agouti, black, argente-golden, cream, bew, dove, lilac, burmese, siamese, slate, nutmeg, honey, polar-fox, pied. A project left out is dealt a name and a coat no other project has; one renamed or recoloured in the pane keeps what was picked.",
+      "default": "butterfield_rrt=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, tinkerbell=Pixie/bew, no-folder=Nomad/pied"
     },
     "openOnStart": {
       "type": "boolean",
