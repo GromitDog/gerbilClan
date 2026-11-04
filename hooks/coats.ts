@@ -14,9 +14,12 @@ export type Coat = {
   dark: string
   /** Helmet and body seams. */
   light: string
-  /** The underside: muzzle, paws and hind feet unless a point colours them. */
+  /** The underside: the tummy, muzzle, paws and hind feet unless a point colours them. */
   belly: string
-  /** The robot's belly plate around the screen; the belly colour if not set. */
+  /**
+   * The plate the belly screen sits on: a steel bezel on the tummy (light steel if
+   * not set), or the rounded plate of a coat with no tummy (the belly colour if not set).
+   */
   plate?: string
   /** Pointed coats (Burmese, Siamese): darker nose, ears, feet and tail. */
   muzzle?: string
@@ -31,33 +34,64 @@ export type Coat = {
   tick?: string
   /** Red-eyed coats: ruby goggle glass and a pink glow. */
   ruby?: boolean
+  /**
+   * False for a self-coloured coat, whose underside is the same colour as its back
+   * (black, slate, lilac, dove, Burmese, Siamese and their pied forms): no lighter
+   * tummy is drawn. Agouti-type coats (golden agouti, argente, nutmeg, honey, polar
+   * fox) show theirs.
+   */
+  tummy?: false
   /** White patches (pied): a blaze down the face and spots on the body. */
   patches?: string
+  /** How much white a pied coat has: `spotted` (the default) or `mottled`, with more spots. */
+  pattern?: 'spotted' | 'mottled'
 }
 
 const WHITE = '#FAF8F4'
 
 export const COATS: readonly Coat[] = [
   { id: 'agouti', label: 'golden agouti', fur: '#C9A064', dark: '#7E5A2E', light: '#E9CF99', belly: '#F7EEDC', ticking: 0.7 },
-  { id: 'black', label: 'black', fur: '#2E2E33', dark: '#0F0F12', light: '#4C4C55', belly: '#45454D', plate: '#CFD8DC', muzzle: '#5A5A63', mouth: '#0A0A0C' },
+  { id: 'black', label: 'black', fur: '#2E2E33', dark: '#0F0F12', light: '#4C4C55', belly: '#45454D', plate: '#CFD8DC', muzzle: '#5A5A63', mouth: '#0A0A0C', tummy: false },
   { id: 'argente-golden', label: 'argente golden', fur: '#E3A35E', dark: '#A4652B', light: '#F4CB92', belly: '#FFFDF8', ticking: 0.4, ruby: true },
-  { id: 'cream', label: 'argente cream', fur: '#F0DDB9', dark: '#B8946A', light: '#FAEEDB', belly: '#FFFFFF', ruby: true },
-  { id: 'bew', label: 'black-eyed white', fur: '#FAF8F4', dark: '#ABA59A', light: '#FFFFFF', belly: '#FFFFFF' },
-  { id: 'dove', label: 'dove', fur: '#CBC4CF', dark: '#8A8290', light: '#E3DEE6', belly: '#F3F0F4', ruby: true },
-  { id: 'lilac', label: 'lilac', fur: '#9F93A8', dark: '#66596E', light: '#C0B5C7', belly: '#B9AFC0', ruby: true },
+  { id: 'cream', label: 'argente cream', fur: '#EDD5AA', dark: '#B08A5C', light: '#FAEEDB', belly: '#FFFFFF', ruby: true },
+  { id: 'bew', label: 'black-eyed white', fur: '#FAF8F4', dark: '#8E877B', light: '#FFFFFF', belly: '#FFFFFF' },
+  { id: 'dove', label: 'dove', fur: '#CBC4CF', dark: '#8A8290', light: '#E3DEE6', belly: '#F3F0F4', ruby: true, tummy: false },
+  { id: 'lilac', label: 'lilac', fur: '#9F93A8', dark: '#66596E', light: '#C0B5C7', belly: '#B9AFC0', ruby: true, tummy: false },
   {
     id: 'burmese', label: 'Burmese', fur: '#5B3F2F', dark: '#2B1B12', light: '#7B5A45', belly: '#6E4E3B',
-    plate: '#C9B8A8', muzzle: '#3E2A1F', ears: '#2E1D14', feet: '#3E2A1F', tail: '#2E1D14', mouth: '#120A06',
+    plate: '#C9B8A8', muzzle: '#3E2A1F', ears: '#2E1D14', feet: '#3E2A1F', tail: '#2E1D14', mouth: '#120A06', tummy: false,
   },
   {
     id: 'siamese', label: 'Siamese', fur: '#E9D5BA', dark: '#9A7A5E', light: '#F4E6D3', belly: '#F3E6D4',
-    muzzle: '#8A6448', ears: '#6B4A36', feet: '#7A5640', tail: '#6B4A36', mouth: '#2A1A10',
+    muzzle: '#8A6448', ears: '#6B4A36', feet: '#7A5640', tail: '#6B4A36', mouth: '#2A1A10', tummy: false,
   },
-  { id: 'slate', label: 'slate', fur: '#5D656F', dark: '#30363D', light: '#7C8590', belly: '#69717B', plate: '#CFD8DC', muzzle: '#78808A', mouth: '#15191D' },
+  { id: 'slate', label: 'slate', fur: '#5D656F', dark: '#30363D', light: '#7C8590', belly: '#69717B', plate: '#CFD8DC', muzzle: '#78808A', mouth: '#15191D', tummy: false },
   { id: 'nutmeg', label: 'nutmeg', fur: '#B9672F', dark: '#6B3714', light: '#D88E57', belly: '#E7C9A6', ticking: 0.7 },
   { id: 'honey', label: 'dark-eyed honey', fur: '#E9A24C', dark: '#AD6A22', light: '#F6CA8C', belly: '#FFFDF8' },
-  { id: 'polar-fox', label: 'polar fox', fur: '#F3EFEA', dark: '#9AA0A7', light: '#FFFFFF', belly: '#FFFFFF', ticking: 0.6, tick: '#7D848C' },
-  { id: 'pied', label: 'pied black', fur: '#2E2E33', dark: '#0F0F12', light: '#4C4C55', belly: WHITE, plate: '#E6ECEF', patches: WHITE },
+  { id: 'polar-fox', label: 'polar fox', fur: '#F3EFEA', dark: '#858C94', light: '#FFFFFF', belly: '#FFFFFF', ticking: 0.6, tick: '#7D848C' },
+  // Pied: white patches on a base coat. A self-coloured base (black, lilac, Burmese)
+  // keeps its dark underside; an agouti-type base keeps its light tummy.
+  { id: 'pied', label: 'pied black', fur: '#2E2E33', dark: '#0F0F12', light: '#4C4C55', belly: WHITE, plate: '#E6ECEF', patches: WHITE, tummy: false },
+  {
+    id: 'mottled-black', label: 'mottled black', fur: '#2E2E33', dark: '#0F0F12', light: '#4C4C55', belly: WHITE,
+    plate: '#E6ECEF', patches: WHITE, tummy: false, pattern: 'mottled',
+  },
+  {
+    id: 'pied-agouti', label: 'pied golden agouti', fur: '#C9A064', dark: '#7E5A2E', light: '#E9CF99', belly: '#F7EEDC',
+    feet: WHITE, ticking: 0.7, patches: WHITE,
+  },
+  {
+    id: 'pied-argente', label: 'pied argente golden', fur: '#E3A35E', dark: '#A4652B', light: '#F4CB92', belly: '#FFFDF8',
+    ticking: 0.4, ruby: true, patches: WHITE,
+  },
+  {
+    id: 'pied-lilac', label: 'pied lilac', fur: '#9F93A8', dark: '#66596E', light: '#C0B5C7', belly: WHITE,
+    plate: '#E6ECEF', ruby: true, patches: WHITE, tummy: false,
+  },
+  {
+    id: 'pied-burmese', label: 'pied Burmese', fur: '#5B3F2F', dark: '#2B1B12', light: '#7B5A45', belly: WHITE,
+    plate: '#E6ECEF', ears: '#2E1D14', tail: '#2E1D14', mouth: '#120A06', patches: WHITE, tummy: false,
+  },
 ]
 
 // Other ways of saying a coat, all lower-cased with hyphens.
@@ -74,6 +108,15 @@ const ALIASES: Record<string, string> = {
   polar: 'polar-fox',
   spotted: 'pied',
   'spotted-black': 'pied',
+  'pied-black': 'pied',
+  mottled: 'mottled-black',
+  'spotted-agouti': 'pied-agouti',
+  'spotted-golden-agouti': 'pied-agouti',
+  'pied-golden-agouti': 'pied-agouti',
+  'spotted-argente': 'pied-argente',
+  'pied-argente-golden': 'pied-argente',
+  'spotted-lilac': 'pied-lilac',
+  'spotted-burmese': 'pied-burmese',
 }
 
 /** The coat with this id; golden agouti for one this version does not know. */

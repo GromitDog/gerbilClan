@@ -1,4 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { coatById, findCoat } from './coats'
+import { gerbilSvg } from './gerbil-svg'
 
 // Runs under `claude plugin test <mod folder>`. The installed 2.1.132 CLI has no
 // `plugin test`; the desktop app's bundled engine does:
@@ -328,6 +330,30 @@ test('on a Mac, the issues file is read from the project folder and the UAT butt
   const dump = await $.command.run({ command: 'overview', args: 'dump' })
   expect(dump.text).toMatch(/^project: butterfield_rrt \[\/users\/amy\/riderprojects\/butterfield_rrt\]/)
   await ui.unmount()
+})
+
+test('pied coats: a self-coloured base keeps its dark underside, an agouti-type base its tummy', async () => {
+  const TUMMY = 'M60 62 C 49 62'
+  const BLAZE = 'M56.5 25 Q60 23.5'
+  for (const id of ['pied', 'mottled-black', 'pied-lilac', 'pied-burmese']) {
+    expect(coatById(id).id).toBe(id)
+    const svg = gerbilSvg('idle', coatById(id))
+    expect(svg).toContain(BLAZE)
+    expect(svg).not.toContain(TUMMY)
+  }
+  // The self colours have no lighter tummy either; the agouti-type ones do.
+  for (const id of ['black', 'dove', 'lilac', 'burmese', 'siamese', 'slate']) {
+    expect(gerbilSvg('idle', coatById(id))).not.toContain(TUMMY)
+  }
+  for (const id of ['pied-agouti', 'pied-argente', 'argente-golden', 'agouti', 'nutmeg', 'honey']) {
+    expect(gerbilSvg('idle', coatById(id))).toContain(TUMMY)
+  }
+  // Mottled has more white than spotted.
+  const spots = (id: string) => gerbilSvg('idle', coatById(id)).split('<ellipse').length
+  expect(spots('mottled-black')).toBeGreaterThan(spots('pied'))
+  expect(findCoat('spotted lilac')?.id).toBe('pied-lilac')
+  expect(findCoat('mottled')?.id).toBe('mottled-black')
+  expect(findCoat('pied black')?.id).toBe('pied')
 })
 
 test('a snapshot an earlier version stored is declined', async ($, on) => {

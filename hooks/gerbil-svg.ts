@@ -96,7 +96,13 @@ export function gerbilSvg(mood: Mood, coat: Coat = COATS[0]!): string {
   const ears = coat.ears ?? fur
   const feet = coat.feet ?? belly
   const tail = coat.tail ?? fur
-  const plate = coat.plate ?? belly
+  // A self-coloured coat (pied black and its kin) has no lighter underside: no tummy,
+  // and the screen sits on a rounded plate. The others show their tummy, the screen
+  // in a steel bezel on it.
+  const tummy = coat.tummy !== false
+  const plate = coat.plate ?? (tummy ? '#B8C4CA' : belly)
+  const white = coat.patches
+  const mottled = coat.pattern === 'mottled'
   const ink = coat.mouth ?? INK
   const glass = coat.ruby ? RUBY_GLASS : INK
   const glow = coat.ruby ? RUBY_GLOW : LED
@@ -123,16 +129,25 @@ export function gerbilSvg(mood: Mood, coat: Coat = COATS[0]!): string {
     `<path d="M34 106 v3 M38 105 v4 M86 106 v3 M82 105 v4" stroke="${dark}" stroke-width="1.2" stroke-linecap="round"/>` +
     // body: an upright oval, narrower than the head
     `<path d="M60 50 C 43 50, 35 66, 35 84 C 35 100, 46 108, 60 108 C 74 108, 85 100, 85 84 C 85 66, 77 50, 60 50 Z" fill="${fur}" stroke="${dark}" stroke-width="2"/>` +
-    (coat.patches
-      ? `<ellipse cx="41.5" cy="74" rx="4" ry="6" fill="${coat.patches}"/><ellipse cx="78" cy="96" rx="5" ry="4" fill="${coat.patches}"/>`
+    (white
+      ? `<ellipse cx="41.5" cy="74" rx="4" ry="6" fill="${white}"/><ellipse cx="78" cy="96" rx="5" ry="4" fill="${white}"/>` +
+        (mottled
+          ? `<ellipse cx="79.5" cy="70" rx="3.5" ry="5" fill="${white}"/><ellipse cx="43" cy="97" rx="4.5" ry="3.5" fill="${white}"/>` +
+            `<ellipse cx="38.5" cy="86" rx="2.5" ry="3" fill="${white}"/><ellipse cx="82" cy="83" rx="2.5" ry="3" fill="${white}"/>`
+          : '')
       : '') +
     `<path d="M40 76 Q60 70 80 76" stroke="${light}" stroke-width="1.6" fill="none" stroke-linecap="round"/>` +
     ticking('M39.5 64 l2 -3 M43 58 l2 -3 M80.5 64 l-2 -3 M77 58 l-2 -3 M38 88 l2 -3 M82 88 l-2 -3') +
-    // belly screen with a pixel heart
-    `<rect x="47" y="72" width="26" height="20" rx="8" fill="${plate}" stroke="${dark}" stroke-width="1.2"/>` +
+    (tummy
+      ? // the tummy: the coat's underside, from the chest down between the paws, and
+        // the belly screen in a steel bezel on it
+        `<path d="M60 62 C 49 62, 44 74, 44 86 C 44 99, 51 106, 60 106 C 69 106, 76 99, 76 86 C 76 74, 71 62, 60 62 Z" fill="${belly}"/>` +
+        `<rect x="49" y="73.5" width="22" height="17" rx="4.5" fill="${plate}" stroke="${dark}" stroke-width="1.2"/>`
+      : // no tummy: the belly screen on a rounded plate
+        `<rect x="47" y="72" width="26" height="20" rx="8" fill="${plate}" stroke="${dark}" stroke-width="1.2"/>`) +
     `<rect x="51" y="75.5" width="18" height="13" rx="3" fill="${INK}"/>` +
     `<path d="M57 79 h2 v-1 h2 v1 h2 v-1 h2 v1 h-1 v1 h1 v1 h-1 v1 h-1 v1 h-1 v1 h-1 v1 h-2 v-1 h-1 v-1 h-1 v-1 h-1 v-1 h-1 v-1 h1 v-1 h1 z" fill="${tint.light}"/>` +
-    `<circle cx="50" cy="75" r="1" fill="${dark}"/><circle cx="70" cy="75" r="1" fill="${dark}"/>` +
+    (tummy ? '' : `<circle cx="50" cy="75" r="1" fill="${dark}"/><circle cx="70" cy="75" r="1" fill="${dark}"/>`) +
     // front paws held together under the screen
     `<rect x="50.5" y="93" width="9" height="6" rx="3" fill="${feet}" stroke="${dark}" stroke-width="1.2"/><rect x="60.5" y="93" width="9" height="6" rx="3" fill="${feet}" stroke="${dark}" stroke-width="1.2"/>` +
     `<path d="M53.5 94.5 v3 M56.5 94.5 v3 M63.5 94.5 v3 M66.5 94.5 v3" stroke="${dark}" stroke-width="1" stroke-linecap="round"/>` +
@@ -144,7 +159,10 @@ export function gerbilSvg(mood: Mood, coat: Coat = COATS[0]!): string {
     // head, with a short muzzle at the bottom
     `<path d="M60 18 C 42 18, 34 30, 35 44 C 36 58, 46 66, 60 66 C 74 66, 84 58, 85 44 C 86 30, 78 18, 60 18 Z" fill="${fur}" stroke="${dark}" stroke-width="2"/>` +
     // a pied gerbil's white blaze, from the helmet seam down to the muzzle
-    (coat.patches ? `<path d="M56.5 25 Q60 23.5 63.5 25 L62.5 50 Q60 51 57.5 50 Z" fill="${coat.patches}"/>` : '') +
+    (white ? `<path d="M56.5 25 Q60 23.5 63.5 25 L62.5 50 Q60 51 57.5 50 Z" fill="${white}"/>` : '') +
+    (white && mottled
+      ? `<ellipse cx="73" cy="28" rx="3.5" ry="2.5" fill="${white}"/><ellipse cx="44" cy="34" rx="2.5" ry="2" fill="${white}"/>`
+      : '') +
     `<ellipse cx="60" cy="56" rx="11" ry="7" fill="${muzzle}" stroke="${dark}" stroke-width="1"/>` +
     // helmet seam and rivets
     `<path d="M41 31 Q60 23 79 31" stroke="${light}" stroke-width="2" fill="none" stroke-linecap="round"/>` +
