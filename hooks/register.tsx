@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, Timer } from 'claude-code'
 
 import type {
+  OverviewClock,
   OverviewGerbil,
   OverviewIssue,
   OverviewIssues,
@@ -12,19 +13,31 @@ import type {
   OverviewTaskRow,
   OverviewView,
 } from '../types'
+import { calledGerbil, environmentNote } from './call'
 import {
   EMPTY_RECORD,
   ISSUE_BAR_ORDER,
   ISSUE_COLOR,
+  STATUSES,
   applyRecord,
+  beatClock,
+  clockMs,
   dayKey,
   dayOf,
   errorMessage,
+  findSession,
+  firstPromptTitle,
   fmtAgo,
   fmtDay,
   fmtHours,
+  fmtRowHours,
+  fmtSpan,
   fmtTime,
+  fmtTotalHours,
+  hoursOf,
+  isCounting,
   isHigh,
+  isStatus,
   isUnderRoot,
   issueCounts,
   joinPath,
@@ -42,6 +55,8 @@ import {
   sprintCounts,
   startOfWeek,
   tieTasks,
+  transcriptOf,
+  withStatus,
   type RawJiraSearch,
   type RawRun,
   type RawSession,
@@ -63,9 +78,29 @@ import { gerbilAscii, gerbilSvg, moodColor } from './gerbil-svg'
 
 const PANE = 'project-overview'
 const TITLE = 'Projects'
+// What this session's row is called until the app's name for it, or its first prompt, is read.
+const UNNAMED = 'This session'
+// How long a refresh waits for the app to say which session this is before going on without.
+const SELF_WAIT_MS = 2_500
+// This session's synopsis is written again at most this often.
+const SELF_ESTIMATE_EVERY_MS = 300_000
 // The desktop app's own MCP servers, by the key their tool names carry.
 const SESSIONS = 'ccd_session_mgmt'
 const TASKS = 'scheduled-tasks'
+// Prompts that are not the person's own words (another session's, a channel's, a
+// background task's report): a gerbil's name in one of these calls nobody.
+const NOT_THE_PERSON: ReadonlySet<string> = new Set([
+  'task-notification',
+  'peer',
+  'peer-send-message',
+  'projects-relay',
+  'channel',
+  'coordinator',
+  'observer',
+  'observer-activity',
+  'auto-continuation',
+  'plugin',
+])
 
 const EMPTY_SNAPSHOT: OverviewSnapshot = {
   at: 0,
@@ -77,17 +112,32 @@ const EMPTY_SNAPSHOT: OverviewSnapshot = {
   errors: [],
   estimating: null,
   gerbils: {},
+  hint: null,
 }
 
 // Bump a shape tag when the value's fields change: a reload then starts over
 // instead of reading what the old code stored.
 const snapshot = atom({ plugin: 'project-overview', key: 'snapshot' } as const, EMPTY_SNAPSHOT, {
-  shape: 'snapshot-3',
+  shape: 'snapshot-4',
 })
 const view = atom(
   { plugin: 'project-overview', key: 'view' } as const,
-  { project: null, editing: null, showAll: false } satisfies OverviewView,
-  { shape: 'view-2' },
+  {
+    project: null,
+    editing: null,
+    showAll: false,
+    called: null,
+    told: null,
+    autoStatus: true,
+  } satisfies OverviewView,
+  { shape: 'view-3' },
+)
+// This session's own clock. It lives in `$.state` so a reload keeps counting
+// where it was; the session's record in `$.store` carries it to a later run.
+const clock = atom(
+  { plugin: 'project-overview', key: 'clock' } as const,
+  { ms: 0, beatAt: 0, isTurnRunning: false, isRestored: false, tick: 0 } satisfies OverviewClock,
+  { shape: 'clock-1' },
 )
 
 type Options = {
@@ -101,6 +151,8 @@ type Options = {
   jiraCloudId: string
   jiraProjects: string
   gerbils: string
+  idleMinutes: number
+  autoStatus: boolean
 }
 
 function readOptions(o: PluginOptions): Options {
@@ -119,6 +171,8 @@ function readOptions(o: PluginOptions): Options {
     jiraCloudId: text('jiraCloudId', '9ce04f13-82f3-4067-bc19-3027caf13167'),
     jiraProjects: text('jiraProjects', 'bragi=BRAG, databasemanager=DBM, seeker=SKR, SeekerScrapers=SKR'),
     gerbils: text('gerbils', DEFAULT_GERBILS),
+    idleMinutes: num('idleMinutes', 5),
+    autoStatus: o.autoStatus !== false,
   }
 }
 
@@ -127,15 +181,43 @@ type Dollar = EngineInterface
 // Module state: lost on a hot reload, which is fine for these.
 let opts: Options = readOptions({})
 let timer: Timer | null = null
+let ticker: Timer | null = null
 let refreshing = false
 let refreshQueued = false
 let selfId = ''
+// Whether the app answered `get_session self` (`waiting`: it has not yet, perhaps asking the
+// person first), and its last answer: this session's real id, name and link.
+let selfLookup: 'untried' | 'waiting' | 'answered' | 'refused' = 'untried'
+let selfSeen: RawSession | null = null
+// What the clock read when this session's record last took it; -1 before the first write.
+let syncedMs = -1
+// This session's own synopsis: when it was last written, and over how many messages.
+let selfEstimate = { at: 0, messages: -1 }
 // The projects roots, `~` expanded once the home folder is read at session start.
 let roots: string[] = parseRoots(opts.projectsRoot, undefined)
 
 /** The project a cwd belongs to, under whichever projects root holds it. */
 function projectAt(cwd: string) {
   return projectOf(cwd, rootFor(cwd, roots))
+}
+
+/** How long the clock runs on after the last sign of life. */
+const idleMs = () => Math.max(1, opts.idleMinutes) * 60_000
+
+/** A sign of life from this session: the clock counts up to it, and the pane's times are drawn again. */
+async function beat(
+  $: Dollar,
+  change: Partial<Pick<OverviewClock, 'isTurnRunning'>> = {},
+): Promise<OverviewClock> {
+  const now = await $.clock.now()
+  return update($, clock, c => ({ ...beatClock(c, now, idleMs()), ...change, tick: c.tick + 1 }))
+}
+
+/** Once a minute: a running turn's minute is counted; either way the pane's times move on. */
+async function minute($: Dollar): Promise<void> {
+  const c = await read($, clock)
+  if (c.isTurnRunning) await beat($)
+  else await update($, clock, x => ({ ...x, tick: x.tick + 1 }))
 }
 
 async function callJson<T>(
@@ -228,6 +310,271 @@ async function saveRecord(
     sessions: s.sessions.map(row => (row.id === id ? applyRecord(row, next) : row)),
   }))
   return next
+}
+
+/** A row's identity, kept with a done record: once archived it may fall outside the list the app returns. */
+function keptOf(row: OverviewSessionRow): NonNullable<SessionRecord['kept']> {
+  return {
+    title: row.title,
+    project: row.project,
+    cwd: row.cwd,
+    lastActivityAt: row.lastActivityAt,
+    ...(row.link ? { link: row.link } : {}),
+  }
+}
+
+/**
+ * Sets a session's status by hand, kept over the estimate's from then on;
+ * `auto` hands it back, and the next refresh estimates it again. Marking done
+ * here stamps the day and archives nothing: that is the row's own done button.
+ */
+async function setStatus($: Dollar, id: string, status: OverviewStatus | 'auto'): Promise<void> {
+  const today = dayKey(await $.clock.now())
+  const row = (await read($, snapshot)).sessions.find(r => r.id === id)
+  await saveRecord($, id, r => ({
+    ...withStatus(r, status, today),
+    ...(status === 'done' && row ? { kept: keptOf(row) } : {}),
+  }))
+  if (status === 'auto') void refresh($, 'status')
+}
+
+/** Whether the estimate may set statuses: kept across sessions, over the `autoStatus` setting. */
+async function setAutoStatus($: Dollar, isOn: boolean): Promise<void> {
+  await update($, view, v => ({ ...v, autoStatus: isOn }))
+  await $.store.set('prefs', { autoStatus: isOn })
+}
+
+/** Sets this session's clock to a figure typed in the pane; it counts on from there. */
+async function setClock($: Dollar, hours: number): Promise<void> {
+  const now = await $.clock.now()
+  await update($, clock, c => ({ ...c, ms: Math.round(hours * 3_600_000), beatAt: now, tick: c.tick + 1 }))
+  await syncSelf($)
+}
+
+/**
+ * This session as the app knows it. The app's list leaves the current session
+ * out; `get_session self` answers it, with its real id, its name and its link.
+ * Null where the call is refused (it needs allowing, as the README says):
+ * the row then goes by the engine's id and the first prompt's words.
+ */
+async function readSelf($: Dollar, why: string): Promise<RawSession | null> {
+  const isAsked = why === 'start' || why === 'button' || why === 'command'
+  // One question at a time (the app may be asking the person to allow the call), and
+  // after a refusal only a refresh the person asked for tries again.
+  if (selfLookup === 'waiting' || (selfLookup === 'refused' && !isAsked)) return selfSeen
+  const lookup: Promise<RawSession | null> = callJson<RawSession>($, SESSIONS, 'get_session', {
+    session_id: 'self',
+  }).then(
+    answer =>
+      answer && typeof answer === 'object' && typeof answer.sessionId === 'string' && answer.sessionId
+        ? answer
+        : null,
+    err => {
+      $.ui.log(`project-overview: this session's name was not read: ${errorMessage(err)}`, { to: 'debug' })
+      return null
+    },
+  )
+  const settle = (answer: RawSession | null) => {
+    selfLookup = answer ? 'answered' : 'refused'
+    if (answer) selfSeen = answer
+  }
+  // An answer comes in a moment. Where the app first asks the person, the refresh does not
+  // wait on them: it goes on without the name, and runs again once they have answered.
+  let onLate = () => {}
+  const late = new Promise<'late'>(resolve => {
+    onLate = () => resolve('late')
+  })
+  const patience = $.clock.after(SELF_WAIT_MS, () => onLate())
+  const first = await Promise.race([lookup, late])
+  if (first === 'late') {
+    selfLookup = 'waiting'
+    void lookup.then(answer => {
+      settle(answer)
+      if (answer) void refresh($, 'self')
+    })
+    return selfSeen
+  }
+  patience.cancel()
+  settle(first)
+  return first ?? selfSeen
+}
+
+/** A name for this session from its own first prompt, where the app's name for it could not be read. */
+async function ownTitle($: Dollar): Promise<string> {
+  try {
+    return firstPromptTitle(await $.session.messages()) || UNNAMED
+  } catch {
+    return UNNAMED
+  }
+}
+
+/**
+ * After a turn, this session's name is read again: the app names a new session
+ * once its first prompt is in, and a session it has not named to the mod can
+ * now go by that prompt's words.
+ */
+async function retitleSelf($: Dollar): Promise<void> {
+  const row = (await read($, snapshot)).sessions.find(r => r.isSelf)
+  if (!row) return
+  const title =
+    selfLookup === 'answered'
+      ? (await readSelf($, 'turn'))?.title
+      : row.title === UNNAMED
+        ? await ownTitle($)
+        : undefined
+  if (!title || title === row.title) return
+  await update($, snapshot, s => ({
+    ...s,
+    sessions: s.sessions.map(r => (r.isSelf ? { ...r, title } : r)),
+  }))
+}
+
+/**
+ * Writes this session's clock to its record, so every session's pane and the
+ * day's total read the same time; a session that has been worked in is `wip`
+ * unless its status was picked. Nothing is written while the clock stands still.
+ */
+async function syncSelf($: Dollar): Promise<void> {
+  if (!selfId) return
+  const ms = clockMs(await read($, clock), await $.clock.now(), idleMs())
+  if (ms <= 0 || ms === syncedMs) return
+  syncedMs = ms
+  const { autoStatus } = await read($, view)
+  await saveRecord($, selfId, r => ({
+    ...r,
+    trackedMs: ms,
+    hours: hoursOf(ms),
+    hoursSource: 'tracked',
+    ...(autoStatus && r.statusSource !== 'manual' && r.status === 'planned'
+      ? { status: 'wip' as const, statusSource: 'model' as const }
+      : {}),
+  }))
+}
+
+/**
+ * This session's own synopsis, from its own conversation: the app's transcript
+ * tool does not read the session it is called from. Its hours are the clock's
+ * and its status is `wip` or what was picked, so only the synopsis is taken.
+ * At most one completion every five minutes, and none while nothing was said.
+ */
+async function estimateSelf($: Dollar): Promise<void> {
+  if (!selfId) return
+  const now = await $.clock.now()
+  if (now - selfEstimate.at < SELF_ESTIMATE_EVERY_MS) return
+  let transcript = ''
+  let count = 0
+  try {
+    const messages = await $.session.messages()
+    count = messages.length
+    transcript = transcriptOf(messages)
+  } catch {
+    return
+  }
+  if (!transcript || count === selfEstimate.messages) return
+  selfEstimate = { at: now, messages: count }
+  const s = await read($, snapshot)
+  const row = s.sessions.find(r => r.id === selfId)
+  const project = s.projects.find(p => p.key === row?.project)
+  await update($, snapshot, cur => ({ ...cur, estimating: selfId }))
+  try {
+    const reply = await $.model.complete({
+      model: opts.estimateModel,
+      system: ESTIMATE_SYSTEM,
+      prompt: buildEstimatePrompt(row?.title ?? UNNAMED, project?.name ?? 'No folder', transcript),
+      maxTokens: 200,
+    })
+    const est = reply.isAnswered ? parseEstimate(reply.text) : null
+    if (est?.synopsis) await saveRecord($, selfId, r => ({ ...r, synopsis: est.synopsis }))
+  } catch (err) {
+    $.ui.log(`project-overview: this session's synopsis was not written: ${errorMessage(err)}`, { to: 'debug' })
+  } finally {
+    await update($, snapshot, cur => (cur.estimating === selfId ? { ...cur, estimating: null } : cur))
+  }
+}
+
+/** A turn of this session ended: its time goes to the record, and its name and synopsis are brought up to date. */
+async function turnEnded($: Dollar): Promise<void> {
+  await syncSelf($)
+  await retitleSelf($)
+  await estimateSelf($)
+}
+
+/**
+ * The folders under the projects roots that the `gerbils` setting names: the
+ * whole clan, whether a project has sessions lately or not, so its gerbil can
+ * be called on before the first one.
+ */
+async function clanFolders($: Dollar): Promise<Omit<OverviewProject, 'lastActivityMs'>[]> {
+  const configured = parseGerbilMap(opts.gerbils)
+  const out: Omit<OverviewProject, 'lastActivityMs'>[] = []
+  for (const root of roots) {
+    let entries: Array<{ name: string; kind: string }>
+    try {
+      entries = await $.fs.list(root)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.kind === 'file' || !configured[entry.name.toLowerCase()]) continue
+      out.push(projectAt(joinPath(root, entry.name)))
+    }
+  }
+  return out
+}
+
+/** The project whose gerbil a prompt calls on: one of the clan as last read, else one the setting names. */
+async function projectCalled($: Dollar, text: string): Promise<OverviewProject | null> {
+  const s = await read($, snapshot)
+  const configured = parseGerbilMap(opts.gerbils)
+  const call = calledGerbil(text, [
+    ...s.projects.map(p => gerbilOf(s, p).name),
+    ...Object.values(configured).map(g => g.name ?? ''),
+  ])
+  if (!call) return null
+  const wanted = call.name.toLowerCase()
+  const named = s.projects.filter(p => gerbilOf(s, p).name.toLowerCase() === wanted)
+  // Two folders may share a gerbil (the same project under two names): the one with a folder here.
+  const known = named.find(p => p.cwd) ?? named[0]
+  if (known) return known
+  // Before the first refresh has read the clan: the setting's folder, looked up under the roots.
+  for (const folder of await clanFolders($)) {
+    if (configured[folder.name.toLowerCase()]?.name?.toLowerCase() === wanted) {
+      return { ...folder, lastActivityMs: 0 }
+    }
+  }
+  return null
+}
+
+/**
+ * What Claude is told beside a prompt when the gerbil on duty changes: the
+ * prompt calls one by name, or one was clicked in the clan since the last
+ * prompt. Null when neither, which is nearly every prompt.
+ */
+async function dutyNote($: Dollar, text: string): Promise<string | null> {
+  const named = await projectCalled($, text)
+  const v = await read($, view)
+  const s = await read($, snapshot)
+  const project = named ?? (v.called && v.called !== v.told ? s.projects.find(p => p.key === v.called) : undefined)
+  if (!project) return null
+  const gerbil = gerbilOf(s, project)
+  await update($, view, cur => ({
+    ...cur,
+    called: project.key,
+    told: project.key,
+    ...(named ? { project: project.key, editing: null } : {}),
+  }))
+  if (named) {
+    // The pane turns to the gerbil that was called, as a click would have turned it.
+    void $.store.set('view', { project: project.key })
+    if (v.project !== project.key) void refresh($, 'call')
+    $.ui.toast(`${gerbil.name} is on duty: ${project.name}`)
+  }
+  return environmentNote({
+    gerbil: gerbil.name,
+    project,
+    sessionCwd: await $.session.cwd(),
+    how: named ? 'named' : 'picked',
+  })
 }
 
 /** The gerbils dealt or picked so far, by project key (projects not seen lately included). */
@@ -375,19 +722,38 @@ async function refresh($: Dollar, why: string): Promise<void> {
       errors.push(`sessions: ${errorMessage(err)}`)
     }
     if (!Array.isArray(raw)) raw = []
-    // The app leaves this session out of its list; add it under its own id.
-    const self = raw.find(s => s.sessionId.endsWith(engineId))
-    if (!self) {
-      raw.push({
-        sessionId: `local_${engineId}`,
-        title: 'This session',
-        cwd: selfCwd,
+    // The app leaves this session out of its list: it is asked for by itself, and goes
+    // by the engine's id and its first prompt's words where that is refused.
+    const fallbackId = `local_${engineId}`
+    const me = await readSelf($, why)
+    const listed = me ? undefined : raw.find(s => s.sessionId.endsWith(engineId))
+    selfId = me?.sessionId ?? listed?.sessionId ?? fallbackId
+    const stale = records[fallbackId]
+    if (me && stale && !records[me.sessionId]) {
+      // What was kept under the engine's id, before the app's own id was read.
+      records[me.sessionId] = stale
+      delete records[fallbackId]
+      await $.store.set('records', records)
+    }
+    // An earlier run of this session counted time: this run's clock starts from it, once.
+    const counted = records[selfId]?.trackedMs ?? 0
+    const ticking = await update($, clock, c =>
+      c.isRestored ? c : { ...c, ms: c.ms + counted, isRestored: true },
+    )
+    const known = me ?? listed
+    const seenAt = Math.max(Date.parse(known?.lastActivityAt ?? '') || 0, ticking.beatAt)
+    raw = [
+      ...raw.filter(s => s.sessionId !== selfId),
+      {
+        ...known,
+        sessionId: selfId,
+        title: known?.title || (await ownTitle($)),
+        cwd: known?.cwd || selfCwd,
         isRunning: true,
         isArchived: false,
-        lastActivityAt: new Date(now).toISOString(),
-      })
-    }
-    selfId = self?.sessionId ?? `local_${engineId}`
+        lastActivityAt: new Date(seenAt || now).toISOString(),
+      },
+    ]
 
     const projectsByKey = new Map<string, OverviewProject>()
     const rows: OverviewSessionRow[] = []
@@ -433,6 +799,10 @@ async function refresh($: Dollar, why: string): Promise<void> {
         ...EMPTY_RECORD,
       }
       rows.push(applyRecord(base, rec))
+    }
+    // The whole clan: a project the gerbils setting names is here before its first session.
+    for (const folder of await clanFolders($)) {
+      if (!projectsByKey.has(folder.key)) projectsByKey.set(folder.key, { ...folder, lastActivityMs: 0 })
     }
     const projects = [...projectsByKey.values()].sort((a, b) => b.lastActivityMs - a.lastActivityMs)
 
@@ -546,12 +916,18 @@ async function refresh($: Dollar, why: string): Promise<void> {
       issues,
       errors,
       gerbils,
+      hint:
+        selfLookup === 'refused' && !me
+          ? "This session's own name and id were not read: allow mcp__ccd_session_mgmt__get_session (README, Permissions)."
+          : null,
     }))
 
+    await syncSelf($)
     if (selected) {
       const name = projectsByKey.get(selected)?.name ?? selected
       await estimateSessions($, selected, name, rows)
     }
+    await estimateSelf($)
   } catch (err) {
     await update($, snapshot, s => ({
       ...s,
@@ -586,6 +962,8 @@ async function estimateSessions(
     )
     .sort((a, b) => Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt))
     .slice(0, Math.max(0, opts.maxEstimatesPerRefresh))
+  // With statuses "yours only", the estimate still writes the synopsis and hours, never a status.
+  const { autoStatus } = await read($, view)
   for (const row of candidates) {
     await update($, snapshot, s => ({ ...s, estimating: row.id }))
     try {
@@ -603,14 +981,17 @@ async function estimateSessions(
       const est = parseEstimate(reply.text)
       if (!est) throw new Error('model: no JSON in the reply')
       await saveRecord($, row.id, r => {
-        const status = r.statusSource === 'manual' ? r.status : est.status
+        // A status that was picked, and hours that were typed or clocked, are kept over the estimate's.
+        const isStatusKept = r.statusSource === 'manual' || !autoStatus
+        const isHoursKept = r.hoursSource === 'manual' || r.hoursSource === 'tracked'
+        const status = isStatusKept ? r.status : est.status
         return {
           ...r,
           synopsis: est.synopsis || r.synopsis,
-          hours: r.hoursSource === 'manual' ? r.hours : est.hours,
-          hoursSource: r.hoursSource === 'manual' ? 'manual' : 'model',
+          hours: isHoursKept ? r.hours : est.hours,
+          hoursSource: isHoursKept ? r.hoursSource : 'model',
           status,
-          statusSource: r.statusSource === 'manual' ? 'manual' : 'model',
+          statusSource: isStatusKept ? r.statusSource : 'model',
           doneOn: status === 'done' ? (r.doneOn ?? dayOf(row.lastActivityAt) ?? undefined) : r.doneOn,
           estimatedFor: row.lastActivityAt,
         }
@@ -628,16 +1009,7 @@ async function estimateSessions(
 /** Marks a session done today and archives it; this session is marked only. */
 async function markDone($: Dollar, id: string, today: string): Promise<void> {
   const row = (await read($, snapshot)).sessions.find(r => r.id === id)
-  // Keep the row's identity: once archived it may fall outside the list the app returns.
-  const kept = row
-    ? {
-        title: row.title,
-        project: row.project,
-        cwd: row.cwd,
-        lastActivityAt: row.lastActivityAt,
-        ...(row.link ? { link: row.link } : {}),
-      }
-    : undefined
+  const kept = row ? keptOf(row) : undefined
   await saveRecord($, id, r => ({
     ...r,
     status: 'done',
@@ -753,15 +1125,80 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'overview',
       description:
-        'Project overview pane: open, refresh, all, dump, done <session id>, backdate <session id>, clan, gerbil [name <Name>|coat <coat>|coats|reset]',
-      argumentHint: '[open|refresh|all|dump|done <id>|backdate <id>|clan|gerbil …]',
+        'Project overview pane: open, refresh, all, dump, status <planned|wip|blocked|done|auto> [session], auto [on|off], done <session id>, backdate <session id>, clan, gerbil [name <Name>|coat <coat>|coats|reset]',
+      argumentHint: '[open|refresh|all|dump|status <status> [session]|auto [on|off]|done <id>|backdate <id>|clan|gerbil …]',
     })
+    // Whether the estimate sets statuses: what was last chosen in the pane, else the setting.
+    try {
+      const prefs = (await $.store.get('prefs')) as { autoStatus?: unknown } | undefined
+      const isOn = typeof prefs?.autoStatus === 'boolean' ? prefs.autoStatus : opts.autoStatus
+      await update($, view, v => ({ ...v, autoStatus: isOn }))
+    } catch {
+      // The setting's default stands.
+    }
+    // No turn is running as a session starts: a clock left counting by a run that was cut short stops here.
+    try {
+      await update($, clock, c => (c.isTurnRunning ? { ...c, isTurnRunning: false } : c))
+    } catch {
+      // The next turn's end stops it.
+    }
     if (opts.openOnStart) void $.ui.open({ id: PANE, title: TITLE })
     void refresh($, 'start')
     timer?.cancel()
     timer = $.clock.every(Math.max(1, opts.refreshMinutes) * 60_000, () => void refresh($, 'timer'))
+    // The session's clock and the pane's times move once a minute.
+    ticker?.cancel()
+    ticker = $.clock.every(60_000, () => void minute($).catch(() => {}))
 
     return next(e)
+  })
+
+  // A prompt is a sign of life for the clock, and may put a gerbil on duty: one it
+  // calls by name, or one clicked in the clan since the last prompt. Claude then reads
+  // which project folder that means, beside the prompt; the prompt itself is untouched.
+  on('prompt.submit', async ($, e, next) => {
+    try {
+      await beat($)
+    } catch {
+      // The clock misses a beat; the prompt is still read.
+    }
+    let note: string | null = null
+    try {
+      if (!e.command && !e.isMeta && !NOT_THE_PERSON.has(e.origin?.kind ?? '')) note = await dutyNote($, e.text)
+    } catch (err) {
+      $.ui.log(`project-overview: prompt not read for a gerbil's name: ${errorMessage(err)}`, { to: 'debug' })
+    }
+    // Said in the debug log either way, so a call that went unheard can be told from one never made.
+    $.ui.log(`project-overview: prompt from ${e.origin?.kind ?? 'unknown'}: ${note ? 'a gerbil was called, note attached' : 'no gerbil called'}`, {
+      to: 'debug',
+    })
+    return next(note ? { ...e, context: [...(e.context ?? []), note] } : e)
+  })
+
+  // The main conversation's turns drive the clock: it counts without a pause while one runs.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      try {
+        await beat($, { isTurnRunning: true })
+      } catch {
+        // The clock misses a beat; the turn goes on.
+      }
+    }
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) {
+      try {
+        await beat($, { isTurnRunning: false })
+        // The record and the synopsis are written after the turn, not inside its end.
+        $.clock.after(250, () => void turnEnded($).catch(() => {}))
+      } catch {
+        // As above.
+      }
+    }
+    return result
   })
 
   on('command.run', { command: 'overview' }, async ($, e) => {
@@ -793,6 +1230,46 @@ export const register: Register = (on, options) => {
             : 'Showing today and carried-forward sessions.',
         }
       }
+      case 'status': {
+        // A status picked by hand, for this session or one named by id or by words of its title.
+        const [what = '', ...words] = rest
+        const word = what.toLowerCase()
+        const want = word === 'auto' ? 'auto' : isStatus(word) ? word : null
+        if (!want) {
+          return {
+            text: 'Usage: /overview status <planned|wip|blocked|done|auto> [session id, or words of its title]; with no session, this one.',
+          }
+        }
+        const s = await read($, snapshot)
+        const query = words.join(' ')
+        const target = query ? findSession(s.sessions, query) : s.sessions.find(r => r.isSelf)
+        if (!target) {
+          return {
+            text: query
+              ? `No session matches "${query}".`
+              : 'This session is not in the pane yet: try again after the first refresh.',
+          }
+        }
+        await setStatus($, target.id, want)
+        return {
+          text:
+            want === 'auto'
+              ? `${target.title}: its status is the estimate's to set again.`
+              : `${target.title}: ${want}, set by you and kept.`,
+        }
+      }
+      case 'auto': {
+        // Whether the estimate sets statuses at all.
+        const want = arg.toLowerCase()
+        if (want && want !== 'on' && want !== 'off') return { text: 'Usage: /overview auto [on|off]' }
+        const isOn = want ? want === 'on' : !(await read($, view)).autoStatus
+        await setAutoStatus($, isOn)
+        return {
+          text: isOn
+            ? 'Statuses are guessed for you again; one you set stays yours.'
+            : 'Statuses are yours only: the estimate no longer sets any.',
+        }
+      }
       case 'done': {
         if (!arg) return { text: 'Usage: /overview done <session id>' }
         await markDone($, arg, today)
@@ -808,6 +1285,8 @@ export const register: Register = (on, options) => {
         // What the pane holds, as text: a check that needs no screen.
         const s = await read($, snapshot)
         const v = await read($, view)
+        const c = await read($, clock)
+        const onDuty = s.projects.find(p => p.key === v.called)
         const key = v.project ?? s.projects[0]?.key ?? null
         const project = s.projects.find(p => p.key === key)
         const rows = s.sessions.filter(r => r.project === key)
@@ -824,10 +1303,12 @@ export const register: Register = (on, options) => {
             .slice(0, 12)
             .map(
               x =>
-                `  ${x.status.padEnd(7)} ${fmtHours(x.hours).padStart(6)}  ${x.title} — ${x.synopsis || '(no synopsis)'}${x.isArchived ? ' [archived]' : ''}${x.doneOn ? ` done ${x.doneOn}` : ''}`,
+                `  ${(x.status + (x.statusSource === 'manual' ? '' : '?')).padEnd(8)} ${fmtRowHours(x).padStart(7)}  ${x.title}${x.isSelf ? ' [this session]' : ''} — ${x.synopsis || '(no synopsis)'}${x.isArchived ? ' [archived]' : ''}${x.doneOn ? ` done ${x.doneOn}` : ''}`,
             ),
           `tasks: ${s.tasks.length === 0 ? 'none on this device' : tasks.map(t => `${t.title} (${t.schedule})`).join('; ') || 'none for this project'}`,
           `clan: ${s.projects.map(p => `${p.name}=${gerbilOf(s, p).name}/${gerbilOf(s, p).coat}`).join(', ') || 'none'}`,
+          `on duty: ${onDuty ? `${gerbilOf(s, onDuty).name} (${onDuty.name})${v.told === v.called ? '' : ', Claude not told yet'}` : 'nobody'}`,
+          `this session: ${s.sessions.find(x => x.isSelf)?.title ?? '(not read yet)'}; clock ${fmtSpan(clockMs(c, await $.clock.now(), idleMs()))}${c.isTurnRunning ? ', a turn running' : ''}; statuses ${v.autoStatus ? 'guessed for you' : 'yours only'}`,
           `errors: ${s.errors.join('; ') || 'none'}`,
         ]
         return { text: lines.join('\n') }
@@ -885,7 +1366,7 @@ export const register: Register = (on, options) => {
       }
       default:
         return {
-          text: `Unknown "${verb}". Use open, refresh, all, dump, done <id>, backdate <id>, clan or gerbil.`,
+          text: `Unknown "${verb}". Use open, refresh, all, dump, status <status> [session], auto [on|off], done <id>, backdate <id>, clan or gerbil.`,
         }
     }
   })
@@ -900,6 +1381,8 @@ export const register: Register = (on, options) => {
 
     const snap = await read($, snapshot)
     const v = await read($, view)
+    // Reading the clock subscribes the pane to it: each beat and each minute draws the times again.
+    const clk = await read($, clock)
     const now = await $.clock.now()
     const today = dayKey(now)
     const cols = Math.max(32, e.props.bodyColumns)
@@ -918,7 +1401,23 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const rows = snap.sessions.filter(r => r.project === project.key)
+    // This session's row is drawn from its own clock as it stands now, not from what the
+    // last refresh stored: its time moves as it passes, and once worked in it is in progress.
+    const liveMs = clockMs(clk, now, idleMs())
+    const isLive = isCounting(clk, now, idleMs())
+    const sessions = snap.sessions.map((r): OverviewSessionRow => {
+      if (!r.isSelf) return r
+      const isWorkedIn = v.autoStatus && r.statusSource !== 'manual' && r.status === 'planned' && liveMs > 0
+      return {
+        ...r,
+        hours: liveMs / 3_600_000,
+        hoursSource: 'tracked',
+        lastActivityAt:
+          clk.beatAt > (Date.parse(r.lastActivityAt) || 0) ? new Date(clk.beatAt).toISOString() : r.lastActivityAt,
+        ...(isWorkedIn ? { status: 'wip' as const, statusSource: 'model' as const } : {}),
+      }
+    })
+    const rows = sessions.filter(r => r.project === project.key)
     const roll = rollup(rows, today)
     const issueSet = snap.issues[project.key]
     const jira = issueSet?.kind === 'jira' ? issueSet.jira : undefined
@@ -932,7 +1431,7 @@ export const register: Register = (on, options) => {
     // What a project's gerbil says, by the same rules for every member of the clan
     // (another project's Jira sprint is read only once it is selected).
     const saysFor = (p: OverviewProject) => {
-      const pRows = p.key === project.key ? rows : snap.sessions.filter(r => r.project === p.key)
+      const pRows = p.key === project.key ? rows : sessions.filter(r => r.project === p.key)
       const pRoll = p.key === project.key ? roll : rollup(pRows, today)
       const set = snap.issues[p.key]
       const pSprint = set?.kind === 'jira' ? set.jira?.sprint : undefined
@@ -960,10 +1459,23 @@ export const register: Register = (on, options) => {
     }
     const gerbil = saysFor(project)
 
-    const selectProject = (key: string) => {
-      void update($, view, cur => ({ ...cur, project: key, editing: null }))
-      void $.store.set('view', { project: key })
-      void refresh($, 'select')
+    // A click on a gerbil of the clan: the pane turns to its project and the gerbil goes
+    // on duty. Claude hears which folder that means with the next prompt, not before.
+    const pickGerbil = (p: OverviewProject) => {
+      const isElsewhere = p.key !== project.key
+      void update($, view, cur => ({
+        ...cur,
+        project: p.key,
+        called: p.key,
+        editing: isElsewhere ? null : cur.editing,
+      }))
+      if (isElsewhere) {
+        void $.store.set('view', { project: p.key })
+        void refresh($, 'select')
+      }
+      if (v.called !== p.key && v.told !== p.key) {
+        $.ui.toast(`${gerbilOf(snap, p).name} is listening: your next message goes to ${p.name}.`)
+      }
     }
 
     // Small pieces. Each is called, not written as a tag: a tree holds the
@@ -975,6 +1487,16 @@ export const register: Register = (on, options) => {
     )
     const statusBadge = (status: OverviewStatus) =>
       badge(status, STATUS_FG[status], STATUS_COLOR[status])
+    // A status as its row shows it: a solid badge once it was picked by hand, plain
+    // coloured words with a question mark while it is only the estimate's guess.
+    const statusChip = (row: OverviewSessionRow) =>
+      row.statusSource === 'manual' ? (
+        statusBadge(row.status)
+      ) : (
+        <Text size="caption" weight="semibold" color={STATUS_COLOR[row.status]}>
+          {row.statusSource === 'model' ? `${row.status}?` : row.status}
+        </Text>
+      )
     const heading = (title: string, meta: JSX.Element | null) => (
       <Box gap={1} alignItems="center" justifyContent="space-between">
         <Text size="heading" weight="semibold">
@@ -1002,6 +1524,8 @@ export const register: Register = (on, options) => {
 
     const sessionRow = (row: OverviewSessionRow, isCarried: boolean) => {
       const editing = v.editing === row.id
+      const pickKey = `status:${row.id}`
+      const picking = v.editing === pickKey
       const title = row.title.length > cols - 14 ? row.title.slice(0, cols - 17) + '…' : row.title
       return (
         <Box key={`row:${row.id}`} flexDirection="column">
@@ -1011,13 +1535,7 @@ export const register: Register = (on, options) => {
               plain
               color={STATUS_COLOR[row.status]}
               label={STATUS_GLYPH[row.status]}
-              onPress={() =>
-                void saveRecord($, row.id, r => ({
-                  ...r,
-                  status: NEXT_STATUS[r.status],
-                  statusSource: 'manual',
-                }))
-              }
+              onPress={() => void setStatus($, row.id, NEXT_STATUS[row.status])}
             />
             <Box flexGrow={1} flexShrink={1}>
               {Link && row.link ? (
@@ -1029,15 +1547,24 @@ export const register: Register = (on, options) => {
               )}
             </Box>
             {row.isRunning && !row.isSelf && badge('running', '#FFFFFF', '#42A5F5')}
-            {row.isSelf && (
-              <Text size="caption" dimColor>
-                this session
-              </Text>
-            )}
+            {row.isSelf &&
+              (isLive ? (
+                badge('live', '#FFFFFF', '#42A5F5')
+              ) : (
+                <Text size="caption" dimColor>
+                  here, paused
+                </Text>
+              ))}
             <Text weight="semibold" tabular>
-              {fmtHours(row.hours)}
+              {fmtRowHours(row)}
             </Text>
-            {statusBadge(row.status)}
+            <Button
+              key={`status-pick:${row.id}`}
+              plain
+              onPress={() => void update($, view, cur => ({ ...cur, editing: picking ? null : pickKey }))}
+            >
+              {statusChip(row)}
+            </Button>
             {isCarried && (
               <Text size="caption" dimColor>
                 {fmtAgo(row.lastActivityAt, now)}
@@ -1076,22 +1603,65 @@ export const register: Register = (on, options) => {
               </Text>
             </Box>
           ) : null}
+          {picking ? (
+            <Box paddingLeft={2} gap={1} alignItems="center" flexWrap="wrap">
+              <Text size="caption" dimColor>
+                {row.statusSource === 'manual'
+                  ? 'set by you:'
+                  : row.statusSource === 'model'
+                    ? 'a guess, until you pick:'
+                    : 'not set yet:'}
+              </Text>
+              {STATUSES.map(status => (
+                <Button
+                  key={`set:${status}:${row.id}`}
+                  plain
+                  onPress={() => {
+                    void setStatus($, row.id, status)
+                    void update($, view, cur => ({ ...cur, editing: null }))
+                  }}
+                >
+                  <Text color={STATUS_COLOR[status]} weight={row.status === status ? 'bold' : undefined}>
+                    {`${STATUS_GLYPH[status]} ${status}`}
+                  </Text>
+                </Button>
+              ))}
+              {row.statusSource === 'manual' && (
+                <Button
+                  key={`set:auto:${row.id}`}
+                  plain
+                  dimColor
+                  label="↺ let it guess"
+                  onPress={() => {
+                    void setStatus($, row.id, 'auto')
+                    void update($, view, cur => ({ ...cur, editing: null }))
+                  }}
+                />
+              )}
+            </Box>
+          ) : null}
+          {/* This session's figure moves by the minute, so its field starts empty: a redraw then leaves
+              the typing alone. What is typed there sets the clock, which counts on from it. */}
           {Input && editing ? (
             <Box paddingLeft={2}>
               <Input
                 key={`hours:${row.id}`}
-                label="hours"
-                placeholder="1.25"
-                value={row.hours ? String(row.hours) : ''}
+                label={row.isSelf ? 'set the clock to (hours)' : 'hours'}
+                placeholder={row.isSelf ? String(hoursOf(liveMs)) : '1.25'}
+                value={row.isSelf ? '' : row.hours ? String(row.hours) : ''}
                 autoFocus
                 onSubmit={value => {
                   const h = Number(value)
                   if (Number.isFinite(h) && h >= 0) {
-                    void saveRecord($, row.id, r => ({
-                      ...r,
-                      hours: Math.round(h * 4) / 4,
-                      hoursSource: 'manual',
-                    }))
+                    if (!row.isSelf) {
+                      void saveRecord($, row.id, r => ({
+                        ...r,
+                        hours: Math.round(h * 4) / 4,
+                        hoursSource: 'manual',
+                      }))
+                    } else if (value.trim()) {
+                      void setClock($, h)
+                    }
                   }
                   void update($, view, cur => ({ ...cur, editing: null }))
                 }}
@@ -1174,6 +1744,10 @@ export const register: Register = (on, options) => {
     const gerbilKey = `gerbil:${project.key}`
     const editingGerbil = v.editing === gerbilKey
     const canEditGerbil = !!(Input || Select)
+    // On duty: this project's gerbil was clicked or called by name in this session.
+    // Heard: Claude has been told so, beside a prompt; until then the gerbil is listening.
+    const isOnDuty = v.called === project.key
+    const isHeard = isOnDuty && v.told === project.key
     const wip = roll.carried.filter(r => r.status === 'wip').length
     const blocked = roll.carried.filter(r => r.status === 'blocked').length
 
@@ -1190,7 +1764,7 @@ export const register: Register = (on, options) => {
               onPress={() => void refresh($, 'button')}
             />,
           ),
-          // Every project's gerbil in its mood; picking one selects its project.
+          // Every project's gerbil in its mood; picking one selects its project and puts it on duty.
           <Box flexWrap="wrap" gap={1}>
             {snap.projects.map(p => {
               const member = gerbilOf(snap, p)
@@ -1213,13 +1787,16 @@ export const register: Register = (on, options) => {
                     dimColor={!isHere}
                     color={isHere ? moodColor(memberMood) : undefined}
                     label={member.name}
-                    onPress={() => {
-                      if (!isHere) selectProject(p.key)
-                    }}
+                    onPress={() => pickGerbil(p)}
                   />
                   <Text size="caption" dimColor={!isHere} weight={isHere ? 'semibold' : undefined} wrap="truncate-end">
                     {p.name}
                   </Text>
+                  {v.called === p.key ? (
+                    <Text size="caption" weight="semibold" color={moodColor(memberMood)}>
+                      {v.told === p.key ? 'on duty' : 'listening'}
+                    </Text>
+                  ) : null}
                 </Box>
               )
             })}
@@ -1349,6 +1926,11 @@ export const register: Register = (on, options) => {
                 <Text size="caption" dimColor>
                   {gerbil.mood}
                 </Text>
+                {isOnDuty ? (
+                  <Text size="caption" weight="semibold" color={mood}>
+                    {isHeard ? 'on duty' : 'listening'}
+                  </Text>
+                ) : null}
               </Box>
               {canEditGerbil ? (
                 <Button
@@ -1363,6 +1945,36 @@ export const register: Register = (on, options) => {
               ) : null}
             </Box>
             <Text wrap="wrap">{gerbil.line}</Text>
+            {isOnDuty ? (
+              <Box gap={1} alignItems="center" flexWrap="wrap">
+                <Text size="caption" dimColor wrap="wrap">
+                  {isHeard
+                    ? project.cwd
+                      ? `Claude is working in ${project.name} for this session.`
+                      : 'Claude is working with no project folder for this session.'
+                    : project.cwd
+                      ? `Your next message goes to ${project.name}.`
+                      : 'Your next message needs no project folder.'}
+                </Text>
+                {isHeard ? null : (
+                  <Button
+                    key="duty-cancel"
+                    plain
+                    dimColor
+                    label="not now"
+                    onPress={() => void update($, view, cur => ({ ...cur, called: cur.told }))}
+                  />
+                )}
+              </Box>
+            ) : (
+              <Button
+                key="duty-call"
+                plain
+                dimColor
+                label={`Hey, ${pet.name}`}
+                onPress={() => pickGerbil(project)}
+              />
+            )}
             {editingGerbil ? (
               <Box flexDirection="column" gap={1}>
                 {Input ? (
@@ -1400,7 +2012,7 @@ export const register: Register = (on, options) => {
               </Text>
               <Text dimColor>·</Text>
               <Text weight="semibold" tabular>
-                {fmtHours(roll.hoursToday)}
+                {fmtTotalHours(roll.today, roll.hoursToday)}
               </Text>
               {roll.doneToday > 0 && badge(`${roll.doneToday} done`, '#FFFFFF', '#7CB342')}
             </Box>,
@@ -1493,10 +2105,24 @@ export const register: Register = (on, options) => {
             '#EF5350',
           )}
 
-        <Text size="caption" dimColor>
-          {snap.at ? `updated ${fmtAgo(new Date(snap.at).toISOString(), now)} ago` : ''}
-          {' · /overview refresh · all · done <id>'}
-        </Text>
+        <Box gap={1} alignItems="center" flexWrap="wrap">
+          <Text size="caption" dimColor>
+            {snap.at ? `updated ${fmtAgo(new Date(snap.at).toISOString(), now)} ago` : ''}
+            {' · /overview refresh · all · status · done <id>'}
+          </Text>
+          <Button
+            key="auto-status"
+            plain
+            dimColor
+            label={v.autoStatus ? 'statuses: guessed for you' : 'statuses: yours only'}
+            onPress={() => void setAutoStatus($, !v.autoStatus)}
+          />
+        </Box>
+        {snap.hint ? (
+          <Text size="caption" dimColor italic wrap="wrap">
+            {snap.hint}
+          </Text>
+        ) : null}
       </Box>
     )
   })

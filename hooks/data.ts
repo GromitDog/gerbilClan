@@ -48,7 +48,9 @@ export type SessionRecord = {
   statusSource: 'model' | 'manual' | 'none'
   synopsis: string
   hours: number
-  hoursSource: 'model' | 'manual' | 'none'
+  hoursSource: 'model' | 'manual' | 'tracked' | 'none'
+  /** What the session's own clock had counted when it last wrote here (ms): a later run of it starts from this. */
+  trackedMs?: number
   estimatedFor?: string
   doneOn?: string
   archived?: boolean
@@ -382,7 +384,8 @@ export function rollup(rows: OverviewSessionRow[], today: string): Rollup {
   out.today.sort(byRecent)
   out.carried.sort(byRecent)
   out.rest.sort(byRecent)
-  out.hoursToday = Math.round(out.hoursToday * 4) / 4
+  // To the hundredth: a clocked session adds minutes, which a quarter-hour step would lose.
+  out.hoursToday = Math.round(out.hoursToday * 100) / 100
   return out
 }
 
@@ -390,6 +393,134 @@ export function fmtHours(h: number): string {
   if (!h) return '–'
   const q = Math.round(h * 4) / 4
   return `${q.toFixed(2).replace(/\.?0+$/, '')}h`
+}
+
+/** `0m`, `42m`, `1h 05m`: a length of time to the minute. */
+export function fmtSpan(ms: number): string {
+  const mins = Math.max(0, Math.floor(ms / 60_000))
+  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${pad2(mins % 60)}m`
+}
+
+const HOUR_MS = 3_600_000
+
+/** A row's hours as drawn: to the minute where a clock counted them, in quarter hours where they are an estimate. */
+export function fmtRowHours(row: Pick<OverviewSessionRow, 'hours' | 'hoursSource'>): string {
+  return row.hoursSource === 'tracked' ? fmtSpan(row.hours * HOUR_MS) : fmtHours(row.hours)
+}
+
+/** A day's total: to the minute once any of its rows was clocked. */
+export function fmtTotalHours(rows: readonly Pick<OverviewSessionRow, 'hoursSource'>[], hours: number): string {
+  return rows.some(r => r.hoursSource === 'tracked') ? fmtSpan(hours * HOUR_MS) : fmtHours(hours)
+}
+
+/** Milliseconds as hours, to the hundredth. */
+export function hoursOf(ms: number): number {
+  return Math.round((ms / HOUR_MS) * 100) / 100
+}
+
+type Beats = { ms: number; beatAt: number }
+
+/**
+ * What a session's clock reads at `now`: the time counted at its last beat,
+ * and the time since, up to `idleMs`. So it runs on for a while after the last
+ * sign of life and then stops, and what it showed is what the next beat keeps.
+ */
+export function clockMs(clock: Beats, now: number, idleMs: number): number {
+  if (!clock.beatAt) return clock.ms
+  return clock.ms + Math.min(Math.max(0, now - clock.beatAt), Math.max(0, idleMs))
+}
+
+/** The clock after a sign of life at `now`. */
+export function beatClock<T extends Beats>(clock: T, now: number, idleMs: number): T {
+  return { ...clock, ms: clockMs(clock, now, idleMs), beatAt: now }
+}
+
+/** Whether the clock is counting at `now`: a turn is running, or the last beat is within the idle allowance. */
+export function isCounting(clock: Beats & { isTurnRunning: boolean }, now: number, idleMs: number): boolean {
+  return clock.beatAt > 0 && (clock.isTurnRunning || now - clock.beatAt < idleMs)
+}
+
+export const STATUSES: readonly OverviewStatus[] = ['planned', 'wip', 'blocked', 'done']
+
+export function isStatus(word: string): word is OverviewStatus {
+  return (STATUSES as readonly string[]).includes(word)
+}
+
+/**
+ * A record after its status was picked by hand: kept over the estimate's from
+ * then on, `done` stamped with the day and any other status clearing the
+ * stamp. `auto` hands it back: the next estimate may set it again.
+ */
+export function withStatus(rec: SessionRecord, status: OverviewStatus | 'auto', today: string): SessionRecord {
+  if (status === 'auto') {
+    return {
+      ...rec,
+      statusSource: rec.statusSource === 'manual' ? 'model' : rec.statusSource,
+      estimatedFor: undefined,
+    }
+  }
+  return {
+    ...rec,
+    status,
+    statusSource: 'manual',
+    doneOn: status === 'done' ? (rec.doneOn ?? today) : undefined,
+  }
+}
+
+/** A session by its id, the end of its id, or words of its title (every word, any case); the most recent of several. */
+export function findSession<T extends { id: string; title: string; isArchived: boolean; lastActivityAt: string }>(
+  rows: readonly T[],
+  query: string,
+): T | undefined {
+  const q = query.trim().toLowerCase()
+  if (!q) return undefined
+  const byId = rows.find(r => r.id.toLowerCase() === q) ?? rows.find(r => r.id.toLowerCase().endsWith(q))
+  if (byId) return byId
+  const words = q.split(/\s+/)
+  return rows
+    .filter(r => words.every(w => r.title.toLowerCase().includes(w)))
+    .sort(
+      (a, b) =>
+        Number(a.isArchived) - Number(b.isArchived) ||
+        (Date.parse(b.lastActivityAt) || 0) - (Date.parse(a.lastActivityAt) || 0),
+    )[0]
+}
+
+type Said = { role: string; text: string }
+
+/**
+ * A message's own words: what the app wrapped around them taken off. The
+ * desktop app sends its reminders in front of a prompt (a new session's first
+ * prompt arrives behind a long one), and a paste arrives in a block of its own:
+ * neither is something the person typed.
+ */
+export function ownWords(text: string): string {
+  return text
+    .replace(/<(system-reminder|pasted_content|command-[\w-]+|local-command-[\w-]+)(\s[^>]*)?>[\s\S]*?<\/\1>/g, '')
+    .trim()
+}
+
+/** A name for a session the app has not named to the mod: the first line of its first prompt. */
+export function firstPromptTitle(messages: readonly Said[]): string {
+  for (const m of messages) {
+    if (m.role !== 'user') continue
+    const line = ownWords(m.text)
+      .split('\n')
+      .map(s => s.trim())
+      .find(Boolean)
+    if (line) return line.length > 60 ? line.slice(0, 57).trimEnd() + '…' : line
+  }
+  return ''
+}
+
+/** This session's conversation as the estimate reads another's: `[role] words`, newest last. */
+export function transcriptOf(messages: readonly Said[]): string {
+  const lines: string[] = []
+  for (const m of messages) {
+    const words = ownWords(m.text).replace(/\s+/g, ' ')
+    if (words) lines.push(`[${m.role}] ${words.length > 500 ? words.slice(0, 500) + '…' : words}`)
+  }
+  return lines.join('\n')
 }
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']

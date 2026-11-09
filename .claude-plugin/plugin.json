@@ -1,7 +1,7 @@
 {
   "name": "project-overview",
-  "version": "0.1.0",
-  "description": "A pane for one project at a time: its sessions with synopsis, effort and status, its issues, today's overview with carry-forward, its scheduled tasks, and a robotic gerbil PM in the middle.",
+  "version": "0.2.0",
+  "description": "A pane for one project at a time: its sessions with synopsis, effort and status, its issues, today's overview with carry-forward, its scheduled tasks, and a robotic gerbil PM in the middle. Call a gerbil by name or click it, and Claude works in its project.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "projectsRoot": {
@@ -57,6 +57,18 @@
       "title": "Gerbil clan",
       "description": "The clan: each project's gerbil PM, as folder=Name/coat pairs separated by commas (no-folder for the No folder sessions). Coats: agouti, black, argente-golden, cream, bew, dove, lilac, burmese, siamese, slate, nutmeg, honey, polar-fox, and the pied ones: pied, mottled-black, pied-agouti, pied-argente, pied-lilac, pied-burmese. A project left out is dealt a name and a coat no other project has; one renamed or recoloured in the pane keeps what was picked.",
       "default": "butterfield_rrt=Butterscotch/argente-golden, rat=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, tinkerbell=Pixie/bew, no-folder=Nomad/pied"
+    },
+    "idleMinutes": {
+      "type": "number",
+      "title": "Clock idle allowance (minutes)",
+      "description": "How long this session's clock runs on after its last sign of life (a prompt, a turn ending) before it pauses. While a turn runs it never pauses.",
+      "default": 5
+    },
+    "autoStatus": {
+      "type": "boolean",
+      "title": "Guess statuses",
+      "description": "Let the estimate set a session's status (wip, blocked, done) until you pick one yourself. Off: a status is only ever what you picked. The pane's own switch (statuses: guessed for you / yours only) is kept over this.",
+      "default": true
     },
     "openOnStart": {
       "type": "boolean",

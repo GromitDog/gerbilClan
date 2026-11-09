@@ -26,10 +26,12 @@ export type OverviewSessionRow = {
   lastActivityAt: string
   link?: string
   status: OverviewStatus
+  /** `manual`: picked in the pane or by command, and kept; `model`: the estimate's guess; `none`: never set. */
   statusSource: 'model' | 'manual' | 'none'
   synopsis: string
   hours: number
-  hoursSource: 'model' | 'manual' | 'none'
+  /** `tracked`: counted by the session's own clock while it ran with the mod; kept over the estimate's. */
+  hoursSource: 'model' | 'manual' | 'tracked' | 'none'
   estimatedFor?: string
   doneOn?: string
   archived?: boolean
@@ -106,6 +108,8 @@ export type OverviewSnapshot = {
   estimating: string | null
   /** Each project's gerbil PM, by project key. */
   gerbils: Record<string, OverviewGerbil>
+  /** A quiet line for the foot of the pane: what a refresh could not read, and what would let it. Never an error. */
+  hint: string | null
 }
 
 /**
@@ -123,12 +127,37 @@ export type OverviewView = {
   /** Selected project key; null until the first refresh picks one. */
   project: string | null
   /**
-   * What is being edited: a session row's id (its hours), or `gerbil:<project
-   * key>` (that project's gerbil's name and coat); null for nothing.
+   * What is being edited: a session row's id (its hours), `status:<row id>`
+   * (its status, the picker open), or `gerbil:<project key>` (that project's
+   * gerbil's name and coat); null for nothing.
    */
   editing: string | null
   /** Show every session of the project, not only today's and carried-forward ones. */
   showAll: boolean
+  /**
+   * The project whose gerbil is on duty in this session: the one last clicked
+   * in the clan or called by name in a prompt. Its folder is the environment
+   * Claude is told to work in. Null until one is called.
+   */
+  called: string | null
+  /** The project Claude was last told of; differs from `called` while a click waits for the next prompt. */
+  told: string | null
+  /** Whether the estimate may set a session's status. False: a status is only ever what was picked. */
+  autoStatus: boolean
+}
+
+/** This session's own clock: the time it has been worked in, counted as it passes. */
+export type OverviewClock = {
+  /** Time counted up to `beatAt`, in milliseconds. */
+  ms: number
+  /** The last sign of life (a prompt, a turn starting or ending, a minute of a running turn); 0 before the first. */
+  beatAt: number
+  /** A turn is running: the clock counts without a pause. */
+  isTurnRunning: boolean
+  /** Whether the time an earlier run of this session counted has been added back (once per run). */
+  isRestored: boolean
+  /** Bumped each minute, so the pane's times are drawn again. */
+  tick: number
 }
 
 declare module 'claude-code' {
@@ -136,6 +165,7 @@ declare module 'claude-code' {
     'project-overview': {
       snapshot: Shaped<OverviewSnapshot>
       view: Shaped<OverviewView>
+      clock: Shaped<OverviewClock>
     }
   }
 }

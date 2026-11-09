@@ -1,5 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { calledGerbil, environmentNote, isWithin } from './call'
 import { coatById, findCoat } from './coats'
+import { EMPTY_RECORD, beatClock, clockMs, findSession, firstPromptTitle, fmtSpan, withStatus } from './data'
 import { gerbilSvg } from './gerbil-svg'
 
 // Runs under `claude plugin test <mod folder>`. The installed 2.1.132 CLI has no
@@ -106,6 +108,13 @@ function standForTheApp(
   tasksAnswer: string | { error: string } = '[]',
   // The tools the device has: the scheduled-tasks server's unless a test takes them away.
   tools: string[] = ['mcp__scheduled-tasks__list_scheduled_tasks', 'mcp__scheduled-tasks__list_task_runs'],
+  // This session as the app answers `get_session self` (refused when left out; late when
+  // `selfAfterMs` says how late), and its own conversation.
+  own: {
+    self?: Record<string, unknown>
+    selfAfterMs?: number
+    messages?: { role: 'user' | 'assistant'; text: string }[]
+  } = {},
 ) {
   on('env.get', (_, e) => ({ value: env[e.name] }))
   on('tool.list', () => ({ value: tools.map(name => ({ name, description: '', mcp: true })) }))
@@ -114,8 +123,14 @@ function standForTheApp(
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: cwd }))
   on('session.id', () => ({ value: 'self' }))
-  // A clock in memory: `clock.now` reads it, and the refresh timer waits for an advance that never comes.
-  mock.clock(on, { now: Date.now() })
+  on('session.messages', () => ({ value: (own.messages ?? []).map(m => ({ ...m, toolUses: [] })) }))
+  // The engine beneath a prompt and a turn: the prompt enters as it arrived (so a test reads
+  // what the mod attached), and a turn starts and ends.
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  // A clock in memory: `clock.now` reads it, and the timers wait for the test to advance it.
+  const clock = mock.clock(on, { now: Date.now() })
   on('ui.log', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   // The kit has no bottom for $.store: one in memory per test.
@@ -125,10 +140,22 @@ function standForTheApp(
     store[String(e.key)] = e.value
     return { value: undefined }
   })
-  on('mcp.call', (_, e) => {
+  on('mcp.call', async (_, e) => {
     switch (e.tool) {
       case 'list_sessions':
         return mcpAnswer(JSON.stringify(SESSIONS))
+      case 'get_session':
+        // As when the app first asks the person whether to allow the call.
+        if (own.selfAfterMs) await clock.sleep(own.selfAfterMs)
+        // Not on the allow list unless a test says the app answers: refused, as auto mode refuses it.
+        return own.self
+          ? mcpAnswer(JSON.stringify(own.self))
+          : {
+              value: {
+                content: [{ type: 'text', text: 'refused: The server-side auto mode classifier gave no verdict' }],
+                isError: true,
+              },
+            }
       case 'list_scheduled_tasks':
         return typeof tasksAnswer === 'string'
           ? mcpAnswer(tasksAnswer)
@@ -171,7 +198,10 @@ function standForTheApp(
       },
     },
   }))
+  return { clock, store }
 }
+
+const typed = (text: string) => ({ text, wait: false, origin: { kind: 'composer' } }) as const
 
 test('the pane shows the project, its issues, the gerbil and a session row', async ($, on) => {
   standForTheApp(on, [])
@@ -363,4 +393,325 @@ test('a snapshot an earlier version stored is declined', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Reading your sessions|No sessions found/ })).toBeDefined()
   await ui.unmount()
+})
+
+// This session as the app answers `get_session self`: its real id and its name.
+const ME = {
+  sessionId: 'local_me',
+  title: 'Gerbil mod improvements',
+  cwd: CWD,
+  isArchived: false,
+  isRunning: true,
+  lastActivityAt: new Date().toISOString(),
+  link: 'claude://claude.ai/epitaxy/local_me',
+}
+
+test('this session goes by its own name, and its clock moves as time passes', async ($, on) => {
+  const { clock, store } = standForTheApp(on, [], CWD, {}, '[]', undefined, {
+    self: ME,
+    messages: [
+      { role: 'user', text: 'tidy the matrix page' },
+      { role: 'assistant', text: 'Done: the page is tidy.' },
+    ],
+  })
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // Its name as the app has it, and nothing to allow; no time counted before the first prompt.
+  expect(await ui.find({ text: /^Gerbil mod improvements$/ })).toBeDefined()
+  expect(await ui.find({ text: /^This session$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /get_session/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^0m$/ })).toBeDefined()
+
+  // A prompt and a turn: the clock counts while the turn runs, minute by minute.
+  await $.prompt.submit(typed('tidy the matrix page'))
+  await $.turn.start({ text: 'tidy the matrix page', turnId: 't1' })
+  await clock.advance(3 * 60_000)
+  expect(await ui.find({ type: 'Text', text: /^3m$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /live/ }))?.text).toBe(' live ')
+  // The day's total takes the minutes in: the other session's hour and a half, and these three.
+  expect(await ui.find({ type: 'Text', text: /^1h 33m$/ })).toBeDefined()
+  // Worked in, so in progress: a guess (the question mark) until a status is picked.
+  expect((await ui.find({ key: 'status-pick:local_me' }))?.text).toBe('wip?')
+
+  // After the turn it runs on for the idle allowance (five minutes), then pauses.
+  await $.turn.complete({ answer: 'Done.', durationMs: 180_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2 * 60_000)
+  expect(await ui.find({ type: 'Text', text: /^5m$/ })).toBeDefined()
+  await clock.advance(10 * 60_000)
+  expect(await ui.find({ type: 'Text', text: /^8m$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /here, paused/ })).toBeDefined()
+
+  // Its synopsis comes from its own conversation, and its time is in its record under its real id.
+  const dump = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(dump.text).toMatch(/Gerbil mod improvements \[this session\] — Plot the TRM score/)
+  expect(dump.text).toMatch(/this session: Gerbil mod improvements; clock 8m/)
+  const records = () => store.records as Record<string, { hours: number; hoursSource: string; status: string }>
+  expect(records().local_me).toEqual(expect.objectContaining({ hoursSource: 'tracked', status: 'wip' }))
+  expect(records().local_self).toBeUndefined()
+
+  // Typing hours on this row sets the clock, which counts on from there.
+  await ui.press({ key: 'edit:local_me' })
+  await ui.input({ key: 'hours:local_me', text: '2' })
+  expect(await ui.find({ type: 'Text', text: /^2h 00m$/ })).toBeDefined()
+  expect(records().local_me).toEqual(expect.objectContaining({ hours: 2, hoursSource: 'tracked' }))
+  await clock.advance(60_000)
+  expect(await ui.find({ type: 'Text', text: /^2h 01m$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('with get_session refused, this session goes by its first prompt and the pane says what to allow', async ($, on) => {
+  standForTheApp(on, [], CWD, {}, '[]', undefined, {
+    messages: [
+      { role: 'user', text: '<system-reminder>context</system-reminder>\nplot the TRM score on the matrix\nand tidy up' },
+    ],
+  })
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /^plot the TRM score on the matrix$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /allow mcp__ccd_session_mgmt__get_session/ })).toBeDefined()
+  // A hint, not an error: the gerbil does not worry about it.
+  const dump = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(dump.text).toMatch(/errors: none/)
+  await ui.unmount()
+})
+
+test('a late answer to get_session does not hold the pane up: the name arrives when it does', async ($, on) => {
+  const { clock } = standForTheApp(on, [], CWD, {}, '[]', undefined, { self: ME, selfAfterMs: 60_000 })
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The refresh gives the app a moment, then goes on without the name.
+  expect(await ui.find({ type: 'Text', text: /Reading your sessions/ })).toBeDefined()
+  await clock.advance(3_000)
+  expect(await ui.find({ type: 'Text', text: /^This session$/ })).toBeDefined()
+  expect(await ui.find({ key: 'done:local_a' })).toBeDefined()
+  // Once the app answers, the pane is read again with it.
+  await clock.advance(60_000)
+  expect(await ui.find({ text: /^Gerbil mod improvements$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^This session$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('calling a gerbil by name tells Claude its project folder, and turns the pane to it', async ($, on) => {
+  standForTheApp(on, [])
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // An ordinary prompt carries nothing, and nobody is on duty.
+  expect((await $.prompt.submit(typed('plot the TRM score'))).context).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^on duty$/ })).toBeUndefined()
+
+  // The prompt goes in as typed; what Claude reads beside it names the folder and how to get there.
+  const sent = await $.prompt.submit(typed('Hey, Digger, why did the nightly scrape fail?'))
+  expect(sent.text).toBe('Hey, Digger, why did the nightly scrape fail?')
+  expect(sent.context).toHaveLength(1)
+  expect(sent.context?.[0]).toMatch(/called on Digger by name/)
+  expect(sent.context?.[0]).toContain('the project folder C:\\Users\\amyjm\\RiderProjects\\SeekerScrapers.')
+  expect(sent.context?.[0]).toMatch(/change_directory/)
+  expect((await ui.find({ type: 'Text', text: /^Digger$/ }))?.text).toBe('Digger')
+  expect(await ui.find({ type: 'Text', text: /^on duty$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Claude is working in SeekerScrapers/ })).toBeDefined()
+
+  // Where the move is refused (auto mode's check can refuse it), Claude is told to read on and say so.
+  expect(sent.context?.[0]).toMatch(/Where the move is refused/)
+  expect(sent.context?.[0]).toMatch(/permission rule for mcp__ccd_directory__change_directory/)
+
+  // A new session's first prompt, as the desktop app hands it over: its reminder first, then the words.
+  const first = await $.prompt.submit(
+    typed('<system-reminder>\nThe user started this session without choosing a project folder.\n</system-reminder>\n\n@digger what got done today?'),
+  )
+  expect(first.context?.[0]).toMatch(/called on Digger by name/)
+
+  // A gerbil whose project this session is already in: no move asked for.
+  const here = await $.prompt.submit(typed('butterscotch: the UAT report'))
+  expect(here.context?.[0]).toMatch(/already working in that folder/)
+  expect(here.context?.[0]).not.toMatch(/change_directory/)
+
+  // Another session's message naming a gerbil calls nobody; nor does a name that only begins a sentence.
+  const peer = await $.prompt.submit({ text: 'Hey, Digger, ping', wait: false, origin: { kind: 'peer' } })
+  expect(peer.context).toBeUndefined()
+  expect((await $.prompt.submit(typed('Scout the repo for dead code'))).context).toBeUndefined()
+  await ui.unmount()
+})
+
+test('clicking a gerbil puts it on duty: Claude hears with the next prompt, once', async ($, on) => {
+  standForTheApp(on, [])
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  const digger = await ui.find({ type: 'Button', text: /^Digger$/ })
+  await ui.press({ key: digger!.key! })
+  expect(await ui.find({ type: 'Text', text: /^listening$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Your next message goes to SeekerScrapers/ })).toBeDefined()
+
+  const sent = await $.prompt.submit(typed('why did the nightly scrape fail?'))
+  expect(sent.context?.[0]).toMatch(/picked Digger in their project overview pane/)
+  expect(sent.context?.[0]).toContain('SeekerScrapers')
+  expect(await ui.find({ type: 'Text', text: /^on duty$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^listening$/ })).toBeUndefined()
+  // Told once: the next prompt carries nothing.
+  expect((await $.prompt.submit(typed('and the one before?'))).context).toBeUndefined()
+
+  // A click taken back before a prompt tells Claude nothing; Digger stays on duty.
+  const butterscotch = await ui.find({ type: 'Button', text: /^Butterscotch$/ })
+  await ui.press({ key: butterscotch!.key! })
+  expect(await ui.find({ type: 'Text', text: /Your next message goes to butterfield_rrt/ })).toBeDefined()
+  await ui.press({ key: 'duty-cancel' })
+  expect((await $.prompt.submit(typed('carry on'))).context).toBeUndefined()
+  const dump = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(dump.text).toMatch(/on duty: Digger \(SeekerScrapers\)/)
+
+  // The selected gerbil's own button calls it without a trip to the clan.
+  await ui.press({ key: 'duty-call' })
+  const again = await $.prompt.submit(typed('now the UAT report'))
+  expect(again.context?.[0]).toMatch(/picked Butterscotch/)
+  expect(again.context?.[0]).toMatch(/already working in that folder/)
+  await ui.unmount()
+})
+
+test('a status is yours once picked: kept, shown solid, and handed back with auto', async ($, on) => {
+  const archived: string[] = []
+  const { clock } = standForTheApp(on, archived)
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    // The estimate's guess wears a question mark; the picker opens from it.
+    expect((await ui.find({ key: 'status-pick:local_b' }))?.text).toBe('wip?')
+    expect(await ui.find({ key: 'set:blocked:local_b' })).toBeUndefined()
+    await ui.press({ key: 'status-pick:local_b' })
+    expect(await ui.find({ type: 'Text', text: /a guess, until you pick/ })).toBeDefined()
+    await ui.press({ key: 'set:blocked:local_b' })
+    // A solid badge now (its label padded), and the picker has closed.
+    expect((await ui.find({ key: 'status-pick:local_b' }))?.text).toBe(' blocked ')
+    expect(await ui.find({ key: 'set:blocked:local_b' })).toBeUndefined()
+    // Handed back: the next refresh estimates it again.
+    await ui.press({ key: 'status-pick:local_b' })
+    await ui.press({ key: 'set:auto:local_b' })
+    await clock.settle()
+    expect((await ui.find({ key: 'status-pick:local_b' }))?.text).toBe('wip?')
+    await ui.unmount()
+  }
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Done from the picker stamps the day and archives nothing: that is the row's own done button.
+  await ui.press({ key: 'status-pick:local_a' })
+  await ui.press({ key: 'set:done:local_a' })
+  expect(archived).toEqual([])
+  expect((await ui.find({ type: 'Text', text: /1 done/ }))?.text).toBe(' 1 done ')
+
+  // By command: a session named by words of its title, or this one when none is named.
+  const set = await $.command.run({ command: 'overview', args: 'status blocked weekly status' })
+  expect(set.text).toMatch(/Weekly status report: blocked, set by you/)
+  expect((await ui.find({ key: 'status-pick:local_b' }))?.text).toBe(' blocked ')
+  const mine = await $.command.run({ command: 'overview', args: 'status wip' })
+  expect(mine.text).toMatch(/This session: wip, set by you/)
+  const usage = await $.command.run({ command: 'overview', args: 'status paused' })
+  expect(usage.text).toMatch(/^Usage: \/overview status/)
+  await ui.unmount()
+})
+
+test('with statuses yours only, the estimate writes the synopsis and leaves the status alone', async ($, on) => {
+  const { store } = standForTheApp(on, [])
+  // What the pane's switch stored in an earlier session.
+  store.prefs = { autoStatus: false }
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Plot the TRM score on the matrix/ })).toBeDefined()
+  expect((await ui.find({ key: 'status-pick:local_a' }))?.text).toBe('planned')
+  expect((await ui.find({ key: 'auto-status' }))?.text).toBe('statuses: yours only')
+  await ui.press({ key: 'auto-status' })
+  expect((await ui.find({ key: 'auto-status' }))?.text).toBe('statuses: guessed for you')
+  expect(store.prefs).toEqual({ autoStatus: true })
+  const off = await $.command.run({ command: 'overview', args: 'auto off' })
+  expect(off.text).toMatch(/yours only/)
+  expect(store.prefs).toEqual({ autoStatus: false })
+  await ui.unmount()
+})
+
+test('a gerbil is called by a greeting anywhere, or by its name set off at the start', async () => {
+  const clan = ['Butterscotch', 'Scout', 'Digger', 'butterscotch']
+  expect(calledGerbil('Hey, Butterscotch', clan)?.name).toBe('Butterscotch')
+  expect(calledGerbil('hey butterscotch can you check the tracker', clan)?.name).toBe('Butterscotch')
+  expect(calledGerbil('Scout, find the dead code', clan)?.name).toBe('Scout')
+  expect(calledGerbil('@digger rerun the scrape', clan)?.name).toBe('Digger')
+  expect(calledGerbil('Right. Hi Digger - rerun it', clan)?.name).toBe('Digger')
+  // An ordinary word, a mention in passing, a longer word: no call.
+  expect(calledGerbil('Scout the repo for dead code', clan)).toBe(null)
+  expect(calledGerbil('ask Butterscotch about it', clan)).toBe(null)
+  expect(calledGerbil('Hey, Scouting party', clan)).toBe(null)
+  expect(calledGerbil('ok, scout around the repo', clan)).toBe(null)
+  // `@name` calls from anywhere; an address that happens to hold a name does not.
+  expect(calledGerbil('what got done today, @butterscotch?', clan)?.name).toBe('Butterscotch')
+  expect(calledGerbil('mail amy@scout.gg about it', clan)).toBe(null)
+  // The desktop app sends its reminder in front of a new session's first prompt: the start is
+  // the start of what was typed. A name inside a reminder or a paste calls nobody.
+  const reminder = '<system-reminder>\nThe user started this session without choosing a project folder.\n</system-reminder>\n\n'
+  expect(calledGerbil(`${reminder}@butterscotch what got done today?`, clan)?.name).toBe('Butterscotch')
+  expect(calledGerbil(`${reminder}Scout, find the dead code`, clan)?.name).toBe('Scout')
+  expect(calledGerbil('<system-reminder>Hey, Digger</system-reminder>\nwhat got done today?', clan)).toBe(null)
+  expect(calledGerbil('<pasted_content id="a1">@digger rerun</pasted_content> summarise this', clan)).toBe(null)
+
+  expect(isWithin('C:\\Users\\amyjm\\RiderProjects\\bragi\\src', 'c:/users/amyjm/riderprojects/bragi')).toBe(true)
+  expect(isWithin('C:\\Users\\amyjm\\RiderProjects\\bragi2', 'c:/users/amyjm/riderprojects/bragi')).toBe(false)
+  // The gerbil of the sessions with no folder names no project, and a Mac path keeps its slashes.
+  const nomad = environmentNote({
+    gerbil: 'Nomad',
+    project: { name: 'No folder', cwd: '' },
+    sessionCwd: '/tmp/x',
+    how: 'named',
+  })
+  expect(nomad).toMatch(/names no project/)
+  const mac = environmentNote({
+    gerbil: 'Skald',
+    project: { name: 'bragi', cwd: '/Users/amy/RiderProjects/bragi' },
+    sessionCwd: '/Users/amy/scratch',
+    how: 'picked',
+  })
+  expect(mac).toContain('the project folder /Users/amy/RiderProjects/bragi.')
+})
+
+test('the clock counts to each beat and runs on for the idle allowance, no further', async () => {
+  const idle = 5 * 60_000
+  const start = 1_000_000
+  let c = { ms: 0, beatAt: 0 }
+  // Nothing before the first sign of life.
+  expect(clockMs(c, start, idle)).toBe(0)
+  c = beatClock(c, start, idle)
+  expect(clockMs(c, start + 60_000, idle)).toBe(60_000)
+  // An hour away from the desk counts five minutes, and the next beat keeps exactly what was shown.
+  expect(clockMs(c, start + 60 * 60_000, idle)).toBe(idle)
+  c = beatClock(c, start + 60 * 60_000, idle)
+  expect(c.ms).toBe(idle)
+  expect(fmtSpan(c.ms)).toBe('5m')
+  expect(fmtSpan(65 * 60_000)).toBe('1h 05m')
+  expect(fmtSpan(0)).toBe('0m')
+})
+
+test('a picked status is kept, done stamps the day, auto hands it back; a session is found by its title', async () => {
+  const guessed = { ...EMPTY_RECORD, status: 'wip' as const, statusSource: 'model' as const, estimatedFor: 'x' }
+  const picked = withStatus(guessed, 'done', '2026-11-09')
+  expect(picked).toEqual(expect.objectContaining({ status: 'done', statusSource: 'manual', doneOn: '2026-11-09' }))
+  const reopened = withStatus(picked, 'wip', '2026-11-10')
+  expect(reopened.doneOn).toBeUndefined()
+  const back = withStatus(reopened, 'auto', '2026-11-10')
+  expect(back).toEqual(expect.objectContaining({ status: 'wip', statusSource: 'model' }))
+  expect(back.estimatedFor).toBeUndefined()
+
+  const rows = [
+    { id: 'local_1', title: 'Weekly status report', isArchived: true, lastActivityAt: '2026-11-08T10:00:00Z' },
+    { id: 'local_2', title: 'Weekly status report', isArchived: false, lastActivityAt: '2026-11-01T10:00:00Z' },
+    { id: 'local_3', title: 'Risk factors', isArchived: false, lastActivityAt: '2026-11-09T10:00:00Z' },
+  ]
+  expect(findSession(rows, 'local_3')?.id).toBe('local_3')
+  expect(findSession(rows, 'STATUS weekly')?.id).toBe('local_2')
+  expect(findSession(rows, 'nothing like it')).toBeUndefined()
+  const said = [
+    { role: 'assistant', text: 'hi' },
+    { role: 'user', text: '\n  fix the login page\nplease' },
+  ]
+  expect(firstPromptTitle(said)).toBe('fix the login page')
 })
