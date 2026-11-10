@@ -148,9 +148,6 @@ export function gerbilSvg(mood: Mood, coat: Coat = COATS[0]!): string {
     `<rect x="51" y="75.5" width="18" height="13" rx="3" fill="${INK}"/>` +
     `<path d="M57 79 h2 v-1 h2 v1 h2 v-1 h2 v1 h-1 v1 h1 v1 h-1 v1 h-1 v1 h-1 v1 h-1 v1 h-2 v-1 h-1 v-1 h-1 v-1 h-1 v-1 h-1 v-1 h1 v-1 h1 z" fill="${tint.light}"/>` +
     (tummy ? '' : `<circle cx="50" cy="75" r="1" fill="${dark}"/><circle cx="70" cy="75" r="1" fill="${dark}"/>`) +
-    // front paws held together under the screen
-    `<rect x="50.5" y="93" width="9" height="6" rx="3" fill="${feet}" stroke="${dark}" stroke-width="1.2"/><rect x="60.5" y="93" width="9" height="6" rx="3" fill="${feet}" stroke="${dark}" stroke-width="1.2"/>` +
-    `<path d="M53.5 94.5 v3 M56.5 94.5 v3 M63.5 94.5 v3 M66.5 94.5 v3" stroke="${dark}" stroke-width="1" stroke-linecap="round"/>` +
     // ears: small speaker discs at the sides of the head
     `<circle cx="39" cy="21" r="8" fill="${ears}" stroke="${dark}" stroke-width="2"/>` +
     `<circle cx="81" cy="21" r="8" fill="${ears}" stroke="${dark}" stroke-width="2"/>` +
@@ -164,6 +161,14 @@ export function gerbilSvg(mood: Mood, coat: Coat = COATS[0]!): string {
       ? `<ellipse cx="73" cy="28" rx="3.5" ry="2.5" fill="${white}"/><ellipse cx="44" cy="34" rx="2.5" ry="2" fill="${white}"/>`
       : '') +
     `<ellipse cx="60" cy="56" rx="11" ry="7" fill="${muzzle}" stroke="${dark}" stroke-width="1"/>` +
+    // front paws held up under the chin, one each side of the muzzle and above the
+    // screen: a short forearm from the body's side, the paw tipped in, toes up
+    `<path d="M39.5 79 Q40.5 71.5 46 67.5 M80.5 79 Q79.5 71.5 74 67.5" stroke="${dark}" stroke-width="6" fill="none" stroke-linecap="round"/>` +
+    `<path d="M39.5 79 Q40.5 71.5 46 67.5 M80.5 79 Q79.5 71.5 74 67.5" stroke="${fur}" stroke-width="3.6" fill="none" stroke-linecap="round"/>` +
+    `<g transform="rotate(-20 47 66.5)"><ellipse cx="47" cy="66.5" rx="4.6" ry="3.4" fill="${feet}" stroke="${dark}" stroke-width="1.2"/>` +
+    `<path d="M44.8 63.8 v1.6 M47 63.4 v1.8 M49.2 63.8 v1.6" stroke="${dark}" stroke-width="0.9" stroke-linecap="round"/></g>` +
+    `<g transform="rotate(20 73 66.5)"><ellipse cx="73" cy="66.5" rx="4.6" ry="3.4" fill="${feet}" stroke="${dark}" stroke-width="1.2"/>` +
+    `<path d="M70.8 63.8 v1.6 M73 63.4 v1.8 M75.2 63.8 v1.6" stroke="${dark}" stroke-width="0.9" stroke-linecap="round"/></g>` +
     // helmet seam and rivets
     `<path d="M41 31 Q60 23 79 31" stroke="${light}" stroke-width="2" fill="none" stroke-linecap="round"/>` +
     ticking('M50 25.5 l1.5 -3 M56 23 l1.5 -3 M62.5 23 l1.5 -3 M68.5 25.5 l1.5 -3 M38 40 l2 -3 M82 40 l-2 -3') +
