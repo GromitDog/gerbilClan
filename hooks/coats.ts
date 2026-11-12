@@ -142,7 +142,7 @@ const NAMES = [
 export const DEFAULT_GERBILS =
   'butterfield_rrt=Butterscotch/argente-golden, rat=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, ' +
   'bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, ' +
-  'tinkerbell=Pixie/bew, no-folder=Nomad/pied'
+  'tinkerbell=Pixie/bew, project-overview=Alpha/slate, no-folder=Nomad/pied'
 
 export type GerbilSetting = { name?: string; coat?: string }
 

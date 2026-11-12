@@ -161,7 +161,7 @@ function readOptions(o: PluginOptions): Options {
   const num = (key: string, fallback: number) =>
     typeof o[key] === 'number' && Number.isFinite(o[key]) ? Number(o[key]) : fallback
   return {
-    projectsRoot: text('projectsRoot', 'C:\\Users\\amyjm\\RiderProjects; ~/RiderProjects'),
+    projectsRoot: text('projectsRoot', 'C:\\Users\\amyjm\\RiderProjects; ~/RiderProjects; ~/.claude/mods'),
     issuesFile: text('issuesFile', '.claude/overview/issues.json'),
     estimateModel: text('estimateModel', 'haiku'),
     refreshMinutes: num('refreshMinutes', 5),

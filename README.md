@@ -79,7 +79,7 @@ A session the desktop app starts reads the folder when it starts and does not wa
 
 `projectsRoot`, `issuesFile`, `estimateModel`, `refreshMinutes`, `maxEstimatesPerRefresh`, `jiraProjects`, `gerbils`, `idleMinutes`, `autoStatus`, `openOnStart` — see `.claude-plugin/plugin.json`.
 
-`projectsRoot` takes several folders separated by semicolons, and `~` is the home folder (`USERPROFILE` on Windows, `HOME` on a Mac). Its default, `C:\Users\amyjm\RiderProjects; ~/RiderProjects`, serves the Windows machine and a Mac whose projects are in `~/RiderProjects`, so the same files run on both. On a Mac whose projects are elsewhere, set it in the mod's settings (`pluginConfigs` → `project-overview` → `options` in `~/.claude/settings.json`).
+`projectsRoot` takes several folders separated by semicolons, and `~` is the home folder (`USERPROFILE` on Windows, `HOME` on a Mac). Its default, `C:\Users\amyjm\RiderProjects; ~/RiderProjects; ~/.claude/mods`, serves the Windows machine and a Mac whose projects are in `~/RiderProjects`, so the same files run on both; `~/.claude/mods` makes this mod a project of its own, looked after by Alpha. On a Mac whose projects are elsewhere, set it in the mod's settings (`pluginConfigs` → `project-overview` → `options` in `~/.claude/settings.json`).
 
 ## Permissions
 
