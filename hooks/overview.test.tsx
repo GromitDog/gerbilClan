@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { calledGerbil, environmentNote, isWithin } from './call'
 import { coatById, findCoat } from './coats'
-import { EMPTY_RECORD, beatClock, clockMs, findSession, firstPromptTitle, fmtSpan, withStatus } from './data'
+import { EMPTY_RECORD, beatClock, clockMs, findSession, firstPromptTitle, fmtSpan, rollup, withStatus } from './data'
 import { gerbilSvg } from './gerbil-svg'
 
 // Runs under `claude plugin test <mod folder>`. The installed 2.1.132 CLI has no
@@ -233,6 +233,56 @@ test('marking a session done keeps it in today and archives it', async ($, on) =
   // A badge: the label padded by a space each side.
   expect((await ui.find({ type: 'Text', text: /1 done/ }))?.text).toBe(' 1 done ')
   await ui.unmount()
+})
+
+test('marking done a session last worked on before today puts it away, not into today', async ($, on) => {
+  const archived: string[] = []
+  standForTheApp(on, archived)
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The weekly report was last worked on in October: carried, not today.
+  expect(await ui.find({ key: 'done:local_b' })).toBeDefined()
+  await ui.press({ key: 'done:local_b' })
+  expect(archived).toEqual(['local_b'])
+  expect(await ui.find({ key: 'done:local_b' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /1 done/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('today is what was worked on today; done does not bring a session into it', async () => {
+  const today = '2026-11-12'
+  const at = (day: number, hour: number) => new Date(2026, 10, day, hour).toISOString()
+  const row = (id: string, lastActivityAt: string, extra: Partial<typeof EMPTY_RECORD> & { isArchived?: boolean } = {}) => ({
+    id,
+    title: id,
+    project: 'butterfield_rrt',
+    cwd: CWD,
+    isSelf: false,
+    isRunning: false,
+    isArchived: false,
+    pinned: false,
+    lastActivityAt,
+    ...EMPTY_RECORD,
+    ...extra,
+  })
+  const done = { status: 'done' as const, statusSource: 'manual' as const, doneOn: today }
+  const r = rollup(
+    [
+      row('worked', at(12, 9), { status: 'wip' }),
+      row('worked-and-done', at(12, 10), { ...done, isArchived: true, hours: 1 }),
+      row('carried-then-done', at(11, 16), { ...done, isArchived: true, hours: 2 }),
+      row('carried-then-done-not-archived', at(10, 16), { ...done, hours: 3 }),
+      row('carried', at(11, 15), { status: 'wip' }),
+      row('archived-in-the-app', at(12, 8), { status: 'wip', isArchived: true }),
+    ],
+    today,
+  )
+  expect(r.today.map(x => x.id)).toEqual(['worked-and-done', 'worked'])
+  expect(r.doneToday).toBe(1)
+  expect(r.hoursToday).toBe(1)
+  expect(r.carried.map(x => x.id)).toEqual(['carried'])
+  expect(r.rest).toEqual([])
 })
 
 test('a project on Jira shows its open sprint', async ($, on) => {

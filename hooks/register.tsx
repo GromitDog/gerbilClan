@@ -778,10 +778,12 @@ async function refresh($: Dollar, why: string): Promise<void> {
       }
       rows.push(applyRecord(base, records[s.sessionId] ?? EMPTY_RECORD))
     }
-    // A session marked done today may have left the list once archived: draw it from its kept row.
+    // A session worked on and marked done today may have left the list once archived: draw it
+    // from its kept row. One last worked on before today is not part of today, done or not.
     const todayKey = dayKey(now)
     for (const [id, rec] of Object.entries(records)) {
       if (rec.doneOn !== todayKey || !rec.kept || rows.some(r => r.id === id)) continue
+      if (dayOf(rec.kept.lastActivityAt) !== todayKey) continue
       const p = projectAt(rec.kept.cwd || selfCwd)
       const ms = Date.parse(rec.kept.lastActivityAt) || 0
       if (!projectsByKey.has(p.key)) projectsByKey.set(p.key, { ...p, lastActivityMs: ms })

@@ -9,7 +9,7 @@ A pane for one project at a time, docked beside the chat: its sessions with a on
 - `/overview all` toggles the full list of the project's sessions.
 - `/overview status <planned|wip|blocked|done|auto> [session]` sets a session's status by hand; the session is named by its id or by words of its title, and left out it is this session. `auto` hands the status back to the estimate.
 - `/overview auto [on|off]` says whether the estimate sets statuses at all (see Statuses).
-- `/overview done <session id>` marks a session done (it stays in Today until midnight, then drops out) and archives it; the app asks before archiving.
+- `/overview done <session id>` marks a session done and archives it: one worked on today stays in Today until midnight, then drops out; one last worked on before today drops out of Carried at once and never shows in Today; the app asks before archiving.
 - `/overview backdate <session id>` sets a done session's day to yesterday, to watch the rollover.
 - `/overview dump` prints what the pane holds, for checking without a screen.
 - `/overview clan` lists every project's gerbil; `/overview gerbil …` renames or recolours the selected one (see below).

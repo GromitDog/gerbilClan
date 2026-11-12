@@ -360,18 +360,18 @@ const byRecent = (a: OverviewSessionRow, b: OverviewSessionRow) =>
   (Date.parse(b.lastActivityAt) || 0) - (Date.parse(a.lastActivityAt) || 0)
 
 /**
- * The day's view of one project's sessions: touched or marked done today go
- * in `today`; untouched work in progress is `carried`; anything else that is
- * not archived or done is `rest` (shown only under "all"). Done before today
- * is gone, which is the rollover.
+ * The day's view of one project's sessions: worked on today goes in `today`,
+ * and only that, so marking done a session last worked on before today puts
+ * it away rather than into today; untouched work in progress is `carried`;
+ * anything else that is not archived or done is `rest` (shown only under
+ * "all"). Done and not worked on today is gone, which is the rollover.
  */
 export function rollup(rows: OverviewSessionRow[], today: string): Rollup {
   const out: Rollup = { today: [], carried: [], rest: [], hoursToday: 0, doneToday: 0 }
   for (const r of rows) {
-    const doneToday = r.doneOn === today
-    const touched = dayOf(r.lastActivityAt) === today
-    if (touched || doneToday) {
-      if (r.isArchived && !doneToday) continue
+    if (dayOf(r.lastActivityAt) === today) {
+      // Archived in the app without being marked done here: put away, not part of the day.
+      if (r.isArchived && r.doneOn !== today) continue
       out.today.push(r)
       out.hoursToday += r.hours
       if (r.status === 'done') out.doneToday += 1
