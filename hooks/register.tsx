@@ -13,7 +13,16 @@ import type {
   OverviewTaskRow,
   OverviewView,
 } from '../types'
-import { calledGerbil, environmentNote } from './call'
+import {
+  TOOL_FEED,
+  TOOL_SET_GERBIL,
+  calledGerbil,
+  environmentNote,
+  feedNote,
+  gerbilProposalNote,
+  isWithin,
+} from './call'
+import { NAME_MODEL, NAME_SYSTEM, buildNamePrompt, parseName } from './naming'
 import {
   EMPTY_RECORD,
   ISSUE_BAR_ORDER,
@@ -39,8 +48,10 @@ import {
   isHigh,
   isStatus,
   isUnderRoot,
+  isAutoModeRefusal,
   issueCounts,
   joinPath,
+  jsonOf,
   mcpText,
   openIssues,
   parseIssuesFile,
@@ -101,6 +112,15 @@ const NOT_THE_PERSON: ReadonlySet<string> = new Set([
   'auto-continuation',
   'plugin',
 ])
+// Prompts with nobody at the keyboard to answer a question: those above, and a
+// scheduled run's. A new gerbil's suggestion then stands without asking.
+const NOBODY_TO_ASK: ReadonlySet<string> = new Set([...NOT_THE_PERSON, 'scheduled-trigger'])
+// In auto mode Claude is asked to hand the app's data over at most this often.
+const FEED_EVERY_MS = 15 * 60_000
+// How long the first prompt in a new project waits for the model to name its gerbil.
+const NAME_WAIT_MS = 10_000
+// New gerbils named per refresh (one model call each).
+const NAMES_PER_REFRESH = 2
 
 const EMPTY_SNAPSHOT: OverviewSnapshot = {
   at: 0,
@@ -195,6 +215,16 @@ let syncedMs = -1
 let selfEstimate = { at: 0, messages: -1 }
 // The projects roots, `~` expanded once the home folder is read at session start.
 let roots: string[] = parseRoots(opts.projectsRoot, undefined)
+// Auto mode: Claude Desktop refused the mod's own MCP calls at the last try (any
+// call that went through says it is not). The pane then shows what Claude hands
+// over (`feed`), and asks for it beside a prompt at most every FEED_EVERY_MS.
+let autoMode = false
+let feedAskedAt = 0
+// Gerbils being named now, by project key: one model call each at a time.
+const naming = new Map<string, Promise<void>>()
+
+/** What Claude last handed over in auto mode, kept across sessions (this session's own row is `selfSeen`). */
+type Fed = { at: number; sessions?: RawSession[]; tasks?: RawTask[] }
 
 /** The project a cwd belongs to, under whichever projects root holds it. */
 function projectAt(cwd: string) {
@@ -220,6 +250,29 @@ async function minute($: Dollar): Promise<void> {
   else await update($, clock, x => ({ ...x, tick: x.tick + 1 }))
 }
 
+/**
+ * One call to an MCP server. Claude Desktop in auto mode refuses every call a
+ * plugin's own code makes, whatever the allow rules say: that refusal is noted
+ * (`autoMode`) and thrown as a short `refused in auto mode` error, which the
+ * callers treat as a known limit (the data then comes from Claude), not a
+ * failure. Any call that goes through says the session is not in auto mode.
+ */
+async function mcpCall($: Dollar, server: string, tool: string, args: Record<string, unknown>) {
+  const refused = () => {
+    autoMode = true
+    return new Error(`${tool}: refused in auto mode (have Claude make the call)`)
+  }
+  let result: Awaited<ReturnType<Dollar['mcp']['call']>>
+  try {
+    result = await $.mcp.call(server, tool, args)
+  } catch (err) {
+    throw isAutoModeRefusal(errorMessage(err)) ? refused() : err
+  }
+  if (result.isError && isAutoModeRefusal(mcpText(result))) throw refused()
+  autoMode = false
+  return result
+}
+
 async function callJson<T>(
   $: Dollar,
   server: string,
@@ -229,7 +282,7 @@ async function callJson<T>(
   // server: "No scheduled tasks found. Use create_scheduled_task..."): that is `value`, not an error.
   emptyAs?: { when: RegExp; value: T },
 ): Promise<T> {
-  const result = await $.mcp.call(server, tool, args)
+  const result = await mcpCall($, server, tool, args)
   const text = mcpText(result)
   if (result.isError) throw new Error(`${tool}: ${text.slice(0, 160) || 'failed'}`)
   let body = text
@@ -278,13 +331,23 @@ async function isServerMissing($: Dollar, err: unknown, server: string): Promise
   }
 }
 
+/** Whether this device has an MCP server's tools at all. */
+async function hasServer($: Dollar, server: string): Promise<boolean> {
+  try {
+    const prefix = `mcp__${server}__`.toLowerCase()
+    return (await $.tool.list()).some(t => t.name.toLowerCase().startsWith(prefix))
+  } catch {
+    return true
+  }
+}
+
 async function callText(
   $: Dollar,
   server: string,
   tool: string,
   args: Record<string, unknown> = {},
 ): Promise<string> {
-  const result = await $.mcp.call(server, tool, args)
+  const result = await mcpCall($, server, tool, args)
   const text = mcpText(result)
   if (result.isError) throw new Error(`${tool}: ${text.slice(0, 160) || 'failed'}`)
   return text
@@ -583,11 +646,16 @@ async function loadGerbils($: Dollar): Promise<Record<string, OverviewGerbil>> {
   return value && typeof value === 'object' ? (value as Record<string, OverviewGerbil>) : {}
 }
 
-/** The gerbil a project has now: the snapshot's, or worked out the way a refresh would. */
-function gerbilOf(s: OverviewSnapshot, project: OverviewProject): OverviewGerbil {
+type ProjectRef = Pick<OverviewProject, 'key' | 'name' | 'cwd'>
+
+/**
+ * The gerbil a project has now: the snapshot's, or worked out the way a refresh
+ * would (a new one's coat fixed here, not drawn at random each time it is read).
+ */
+function gerbilOf(s: OverviewSnapshot, project: Pick<OverviewProject, 'key' | 'name'>): OverviewGerbil {
   return (
     s.gerbils[project.key] ??
-    assignGerbils([project], {}, parseGerbilMap(opts.gerbils))[project.key] ?? {
+    assignGerbils([project], {}, parseGerbilMap(opts.gerbils), () => 0)[project.key] ?? {
       name: 'Gerbil',
       coat: 'agouti',
       source: 'auto',
@@ -595,23 +663,223 @@ function gerbilOf(s: OverviewSnapshot, project: OverviewProject): OverviewGerbil
   )
 }
 
-/** Renames or recolours a project's gerbil; what Amy picks is kept over the setting. */
+/** Keeps one project's gerbil, in the store and in the pane. */
+async function keepGerbil($: Dollar, key: string, next: OverviewGerbil): Promise<void> {
+  const stored = await loadGerbils($)
+  await $.store.set('gerbils', { ...stored, [key]: next })
+  await update($, snapshot, cur => ({ ...cur, gerbils: { ...cur.gerbils, [key]: next } }))
+}
+
+/**
+ * Renames or recolours a project's gerbil. What Amy picks is `manual`, kept
+ * over the setting and everything else; `auto` keeps a suggestion as one.
+ * Either way the suggestion is settled: nobody is asked about it again.
+ */
 async function saveGerbil(
   $: Dollar,
-  project: OverviewProject,
+  project: Pick<OverviewProject, 'key' | 'name'>,
   change: { name?: string; coat?: string },
+  source: 'manual' | 'auto' = 'manual',
 ): Promise<OverviewGerbil> {
   const s = await read($, snapshot)
-  const now = gerbilOf(s, project)
+  const stored = await loadGerbils($)
+  const now = s.gerbils[project.key] ?? stored[project.key] ?? gerbilOf(s, project)
   const next: OverviewGerbil = {
     name: change.name?.trim().slice(0, 24) || now.name,
     coat: change.coat ?? now.coat,
-    source: 'manual',
+    source,
   }
-  const stored = await loadGerbils($)
-  await $.store.set('gerbils', { ...stored, [project.key]: next })
-  await update($, snapshot, cur => ({ ...cur, gerbils: { ...cur.gerbils, [project.key]: next } }))
+  await keepGerbil($, project.key, next)
   return next
+}
+
+/** Every gerbil name in the clan: picked, set, suggested, and the setting's. */
+async function takenNames($: Dollar, except = ''): Promise<string[]> {
+  const s = await read($, snapshot)
+  const stored = await loadGerbils($)
+  const names = [
+    ...Object.entries({ ...stored, ...s.gerbils })
+      .filter(([key, g]) => key !== except && !g.proposal)
+      .map(([, g]) => g.name),
+    ...Object.values(parseGerbilMap(opts.gerbils)).map(g => g.name ?? ''),
+  ]
+  const seen = new Set<string>()
+  return names.filter(n => n && !seen.has(n.toLowerCase()) && !!seen.add(n.toLowerCase()))
+}
+
+/** The start of a project's README.md or CLAUDE.md, if it has either. */
+async function aboutOf($: Dollar, cwd: string): Promise<string> {
+  if (!cwd) return ''
+  let entries: Array<{ name: string }>
+  try {
+    entries = await $.fs.list(cwd)
+  } catch {
+    return ''
+  }
+  for (const want of ['readme.md', 'claude.md', 'readme', 'readme.txt']) {
+    const hit = entries.find(e => e.name.toLowerCase() === want)
+    if (!hit) continue
+    try {
+      return (await $.fs.read(joinPath(cwd, hit.name))).slice(0, 4000)
+    } catch {
+      // The next one.
+    }
+  }
+  return ''
+}
+
+/**
+ * Asks the model (Haiku, by the route the estimates take) for a new project's
+ * gerbil's name, from its folder, README or CLAUDE.md, recent session titles,
+ * and the names already taken. The suggestion is then `named`; where the
+ * model could not be asked or gave no usable name, `unnamed`, and Claude is
+ * asked to think of one. A gerbil whose name is no longer pending is left be.
+ */
+function nameGerbil($: Dollar, project: ProjectRef): Promise<void> {
+  const running = naming.get(project.key)
+  if (running) return running
+  const work = (async () => {
+    const stored = await loadGerbils($)
+    const s = await read($, snapshot)
+    const now = stored[project.key] ?? s.gerbils[project.key]
+    if (now && now.proposal !== 'naming') return
+    const base = now ?? gerbilOf(s, project)
+    const taken = await takenNames($, project.key)
+    const titles = s.sessions
+      .filter(r => r.project === project.key)
+      .sort((a, b) => Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt))
+      .map(r => r.title)
+    let name: string | null = null
+    try {
+      const reply = await $.model.complete({
+        model: NAME_MODEL,
+        system: NAME_SYSTEM,
+        prompt: buildNamePrompt({ folder: project.name, about: await aboutOf($, project.cwd), titles, taken }),
+        maxTokens: 40,
+        timeoutMs: NAME_WAIT_MS,
+      })
+      if (reply.isAnswered) name = parseName(reply.text, taken, project.name)
+      else $.ui.log(`project-overview: no name for ${project.name}'s gerbil: ${reply.reason}`, { to: 'debug' })
+    } catch (err) {
+      $.ui.log(`project-overview: no name for ${project.name}'s gerbil: ${errorMessage(err)}`, { to: 'debug' })
+    }
+    // Settled meanwhile (picked in the pane, say): leave it.
+    const latest = (await loadGerbils($))[project.key]
+    if (latest && latest.proposal !== 'naming') return
+    await keepGerbil($, project.key, {
+      ...base,
+      ...(name ? { name, proposal: 'named' as const } : { proposal: 'unnamed' as const }),
+    })
+  })().finally(() => naming.delete(project.key))
+  naming.set(project.key, work)
+  return work
+}
+
+/**
+ * The first prompt in a project whose gerbil is only a suggestion: Claude is
+ * told to put it to the person and save their answer. Once only: the suggestion
+ * is settled as it stands (`auto`) whether or not they answer. With nobody at
+ * the prompt (a scheduled run) it settles without a note.
+ */
+async function proposalNote($: Dollar, origin: string): Promise<string | null> {
+  const project = projectAt(await $.session.cwd())
+  const stored = await loadGerbils($)
+  const configured = parseGerbilMap(opts.gerbils)
+  const first = assignGerbils([project], stored, configured)[project.key]
+  if (!first?.proposal) return null
+  // A gerbil new to the store is kept before it is named, so the pane and this note agree on its coat.
+  if (!stored[project.key]) await keepGerbil($, project.key, first)
+  if (first.proposal === 'naming') await nameGerbil($, project)
+  const g = (await loadGerbils($))[project.key] ?? first
+  if (!g.proposal) return null
+  const { proposal, ...settled } = g
+  await keepGerbil($, project.key, { ...settled, source: 'auto' })
+  if (NOBODY_TO_ASK.has(origin)) return null
+  return gerbilProposalNote({
+    project: project.name,
+    name: g.name,
+    coat: g.coat,
+    coatLabel: coatById(g.coat).label,
+    isUnnamed: proposal !== 'named',
+    taken: await takenNames($, project.key),
+    coats: COATS.map(c => c.id),
+  })
+}
+
+/** The project a tool's `project` names: a project's name, key or folder; left out, this session's. */
+async function projectNamed($: Dollar, text: unknown): Promise<ProjectRef | null> {
+  const own = projectAt(await $.session.cwd())
+  const want = typeof text === 'string' ? text.trim() : ''
+  if (!want) return own
+  const s = await read($, snapshot)
+  const lower = want.toLowerCase()
+  return (
+    s.projects.find(p => p.name.toLowerCase() === lower || p.key.toLowerCase() === lower) ??
+    s.projects.find(p => p.cwd && isWithin(want, p.cwd)) ??
+    (own.name.toLowerCase() === lower || (own.cwd && isWithin(want, own.cwd)) ? own : null)
+  )
+}
+
+/** The `set_gerbil` tool: Claude saving what the person chose for a project's gerbil. */
+async function setGerbilTool($: Dollar, input: Record<string, unknown>): Promise<string> {
+  const project = await projectNamed($, input.project)
+  if (!project) throw new Error(`No project "${String(input.project)}" in the overview.`)
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  const coatText = typeof input.coat === 'string' ? input.coat : ''
+  const coat = coatText ? findCoat(coatText) : undefined
+  if (coatText && !coat) throw new Error(`No coat "${coatText}". Coats: ${COATS.map(c => c.id).join(', ')}.`)
+  const g = await saveGerbil($, project, { name, coat: coat?.id }, input.confirmed === false ? 'auto' : 'manual')
+  return `${g.name}, the ${coatById(g.coat).label} gerbil, is PM for ${project.name}${g.source === 'manual' ? ', as the user chose' : ' (a suggestion until the user answers)'}.`
+}
+
+/** What Claude handed over in auto mode, kept across sessions. */
+async function loadFed($: Dollar): Promise<Fed> {
+  const value = await $.store.get('fed')
+  return value && typeof value === 'object' ? (value as Fed) : { at: 0 }
+}
+
+/** A list in a tool's answer: the list itself, or under `key` in an object. */
+function listIn<T>(value: unknown, key: string): T[] | undefined {
+  if (Array.isArray(value)) return value as T[]
+  if (value && typeof value === 'object' && Array.isArray((value as Record<string, unknown>)[key])) {
+    return (value as Record<string, unknown>)[key] as T[]
+  }
+  return undefined
+}
+
+/**
+ * The `feed` tool and `/overview feed`: the answers of list_sessions,
+ * get_session self and list_scheduled_tasks as Claude got them, in auto mode
+ * where the mod may not ask for them itself. Kept, then the pane is read again.
+ */
+async function feed($: Dollar, input: Record<string, unknown>): Promise<string> {
+  const before = await loadFed($)
+  const sessions = input.sessions === undefined ? undefined : listIn<RawSession>(jsonOf(input.sessions), 'sessions')
+  const rawTasks = input.scheduled_tasks
+  const tasks =
+    rawTasks === undefined
+      ? undefined
+      : typeof rawTasks === 'string' && !/[[{]/.test(rawTasks)
+        ? // "No scheduled tasks found. …": none.
+          []
+        : listIn<RawTask>(jsonOf(rawTasks), 'tasks')
+  const self = jsonOf(input.self) as RawSession | undefined
+  const isSelf = !!self && typeof self === 'object' && typeof self.sessionId === 'string' && !!self.sessionId
+  if (!sessions && !tasks && !isSelf) {
+    throw new Error('Nothing usable: pass {"sessions": [...], "self": {...}, "scheduled_tasks": [...]} as the app\'s tools answered.')
+  }
+  const now = await $.clock.now()
+  const next: Fed = {
+    at: now,
+    sessions: (sessions ?? before.sessions)?.filter(s => s && typeof s.sessionId === 'string'),
+    tasks: (tasks ?? before.tasks)?.filter(t => t && typeof t.taskId === 'string'),
+  }
+  await $.store.set('fed', next)
+  // readSelf answers this where the app refuses the mod's own get_session.
+  if (isSelf) selfSeen = self
+  feedAskedAt = now
+  void refresh($, 'feed')
+  return `Thanks: the overview has ${next.sessions?.length ?? 0} sessions${isSelf ? ', this session' : ''} and ${next.tasks?.length ?? 0} scheduled tasks.`
 }
 
 async function readIssues(
@@ -709,6 +977,8 @@ async function refresh($: Dollar, why: string): Promise<void> {
     const records = await loadRecords($)
     const selfCwd = await $.session.cwd()
     const engineId = await $.session.id()
+    // In auto mode the app's data comes from Claude: what it last handed over.
+    const fed = await loadFed($)
 
     let raw: RawSession[] = []
     try {
@@ -719,7 +989,8 @@ async function refresh($: Dollar, why: string): Promise<void> {
         include_archived: true,
       })
     } catch (err) {
-      errors.push(`sessions: ${errorMessage(err)}`)
+      if (isAutoModeRefusal(errorMessage(err))) raw = fed.sessions ?? []
+      else errors.push(`sessions: ${errorMessage(err)}`)
     }
     if (!Array.isArray(raw)) raw = []
     // The app leaves this session out of its list: it is asked for by itself, and goes
@@ -820,7 +1091,8 @@ async function refresh($: Dollar, why: string): Promise<void> {
           value: [],
         })
       } catch (err) {
-        if (!(await isServerMissing($, err, TASKS))) throw err
+        if (isAutoModeRefusal(errorMessage(err))) answer = fed.tasks ?? []
+        else if (!(await isServerMissing($, err, TASKS))) throw err
       }
       const rawTasks: RawTask[] = Array.isArray(answer)
         ? answer
@@ -829,8 +1101,10 @@ async function refresh($: Dollar, why: string): Promise<void> {
           : []
       const runsByTask: Record<string, RawRun[]> = {}
       const skillTexts: Record<string, string> = {}
+      // In auto mode the runs are refused too: the tasks are tied by their prompt files alone.
+      let isRunsRefused = false
       for (const t of rawTasks) {
-        try {
+        if (!isRunsRefused) try {
           const runs = await callJson<RawRun[] | { runs?: RawRun[] }>(
             $,
             TASKS,
@@ -840,7 +1114,8 @@ async function refresh($: Dollar, why: string): Promise<void> {
           )
           runsByTask[t.taskId] = Array.isArray(runs) ? runs : (runs.runs ?? [])
         } catch (err) {
-          errors.push(`runs of ${t.title ?? t.taskId}: ${errorMessage(err)}`)
+          if (isAutoModeRefusal(errorMessage(err))) isRunsRefused = true
+          else errors.push(`runs of ${t.title ?? t.taskId}: ${errorMessage(err)}`)
         }
         if (t.path) {
           try {
@@ -900,7 +1175,7 @@ async function refresh($: Dollar, why: string): Promise<void> {
       issues[selected] = await readJiraSprint($, selectedSet, selectedSet.jira.projectKey)
     }
 
-    // Each project's gerbil: picked, set, or dealt once and then kept.
+    // Each project's gerbil: picked, set, or suggested once and then kept.
     const storedGerbils = await loadGerbils($)
     const gerbils = assignGerbils(projects, storedGerbils, parseGerbilMap(opts.gerbils))
     const keptGerbils = { ...storedGerbils, ...gerbils }
@@ -918,11 +1193,17 @@ async function refresh($: Dollar, why: string): Promise<void> {
       issues,
       errors,
       gerbils,
-      hint:
-        selfLookup === 'refused' && !me
+      hint: autoMode
+        ? `auto mode: data comes from Claude${fed.at ? `, last handed over at ${fmtTime(new Date(fed.at).toISOString())}` : ', asked for with your next message'}`
+        : selfLookup === 'refused' && !me
           ? "This session's own name and id were not read: allow mcp__ccd_session_mgmt__get_session (README, Permissions)."
           : null,
     }))
+
+    // New projects' gerbils are named by the model, a few per refresh, after the pane is drawn.
+    for (const p of projects.filter(p => gerbils[p.key]?.proposal === 'naming').slice(0, NAMES_PER_REFRESH)) {
+      await nameGerbil($, p)
+    }
 
     await syncSelf($)
     if (selected) {
@@ -999,6 +1280,8 @@ async function estimateSessions(
         }
       })
     } catch (err) {
+      // In auto mode the transcripts cannot be read by the mod: no estimates, and no error.
+      if (isAutoModeRefusal(errorMessage(err))) break
       await update($, snapshot, s => ({
         ...s,
         errors: [...s.errors, `estimate "${row.title}": ${errorMessage(err)}`].slice(-5),
@@ -1128,8 +1411,41 @@ export const register: Register = (on, options) => {
       name: 'overview',
       description:
         'Project overview pane: open, refresh, all, dump, status <planned|wip|blocked|done|auto> [session], auto [on|off], done <session id>, backdate <session id>, clan, gerbil [name <Name>|coat <coat>|coats|reset]',
-      argumentHint: '[open|refresh|all|dump|status <status> [session]|auto [on|off]|done <id>|backdate <id>|clan|gerbil …]',
+      argumentHint: '[open|refresh|all|dump|status <status> [session]|auto [on|off]|done <id>|backdate <id>|clan|gerbil …|feed <json>]',
     })
+    // Tools Claude calls: saving the person's choice of gerbil, and handing over the app's
+    // data where auto mode stops the mod asking for it. Awaited, so they are listed by turn one.
+    try {
+      await $.tool.register({
+        name: 'set_gerbil',
+        description:
+          "Saves a project's gerbil PM in the user's project overview pane: its name and/or coat. Call it with what the user chose when asked about a new project's gerbil (confirmed: true), or with your own suggestion when told to (confirmed: false).",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'One word, the gerbil\'s name.' },
+            coat: { type: 'string', description: `A coat id or its breeder's name: ${COATS.map(c => c.id).join(', ')}.` },
+            confirmed: { type: 'boolean', description: 'true (default): the user chose it, and it is kept over everything; false: only a suggestion.' },
+            project: { type: 'string', description: "The project's folder name or path; left out, this session's project." },
+          },
+        },
+      })
+      await $.tool.register({
+        name: 'feed',
+        description:
+          'Hands the project overview pane the answers of the app\'s own tools, which Claude Desktop in auto mode does not let the mod call itself. Pass each answer unchanged (JSON text or value).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sessions: { description: 'What mcp__ccd_session_mgmt__list_sessions answered.' },
+            self: { description: 'What mcp__ccd_session_mgmt__get_session answered for session_id "self".' },
+            scheduled_tasks: { description: 'What mcp__scheduled-tasks__list_scheduled_tasks answered.' },
+          },
+        },
+      })
+    } catch (err) {
+      $.ui.log(`project-overview: tools not registered: ${errorMessage(err)}`, { to: 'debug' })
+    }
     // Whether the estimate sets statuses: what was last chosen in the pane, else the setting.
     try {
       const prefs = (await $.store.get('prefs')) as { autoStatus?: unknown } | undefined
@@ -1164,17 +1480,55 @@ export const register: Register = (on, options) => {
     } catch {
       // The clock misses a beat; the prompt is still read.
     }
+    const origin = e.origin?.kind ?? ''
+    const isPerson = !e.command && !e.isMeta && !NOT_THE_PERSON.has(origin)
     let note: string | null = null
     try {
-      if (!e.command && !e.isMeta && !NOT_THE_PERSON.has(e.origin?.kind ?? '')) note = await dutyNote($, e.text)
+      if (isPerson) note = await dutyNote($, e.text)
     } catch (err) {
       $.ui.log(`project-overview: prompt not read for a gerbil's name: ${errorMessage(err)}`, { to: 'debug' })
     }
+    // A new project's gerbil, suggested: put to the person once (settled quietly with nobody to ask).
+    let proposal: string | null = null
+    try {
+      if (!e.command && !e.isMeta) proposal = await proposalNote($, origin)
+    } catch (err) {
+      $.ui.log(`project-overview: new gerbil not suggested: ${errorMessage(err)}`, { to: 'debug' })
+    }
+    // Auto mode: Claude is asked to hand over the app's data, at most every FEED_EVERY_MS.
+    let feedAsk: string | null = null
+    try {
+      const now = await $.clock.now()
+      if (isPerson && autoMode && now - feedAskedAt >= FEED_EVERY_MS) {
+        feedAskedAt = now
+        feedAsk = feedNote({ hasTasks: await hasServer($, TASKS) })
+      }
+    } catch (err) {
+      $.ui.log(`project-overview: no feed asked for: ${errorMessage(err)}`, { to: 'debug' })
+    }
     // Said in the debug log either way, so a call that went unheard can be told from one never made.
-    $.ui.log(`project-overview: prompt from ${e.origin?.kind ?? 'unknown'}: ${note ? 'a gerbil was called, note attached' : 'no gerbil called'}`, {
-      to: 'debug',
-    })
-    return next(note ? { ...e, context: [...(e.context ?? []), note] } : e)
+    $.ui.log(
+      `project-overview: prompt from ${origin || 'unknown'}: ${note ? 'a gerbil was called, note attached' : 'no gerbil called'}${proposal ? '; new gerbil suggested' : ''}${feedAsk ? '; auto-mode feed asked for' : ''}`,
+      { to: 'debug' },
+    )
+    const notes = [note, proposal, feedAsk].filter((n): n is string => !!n)
+    return next(notes.length ? { ...e, context: [...(e.context ?? []), ...notes] } : e)
+  })
+
+  // The mod's own tools, called by Claude.
+  on('tool.call', { tool: TOOL_SET_GERBIL }, async ($, e) => {
+    try {
+      return { result: await setGerbilTool($, e as unknown as Record<string, unknown>) }
+    } catch (err) {
+      return { deny: errorMessage(err) }
+    }
+  })
+  on('tool.call', { tool: TOOL_FEED }, async ($, e) => {
+    try {
+      return { result: await feed($, e as unknown as Record<string, unknown>) }
+    } catch (err) {
+      return { deny: errorMessage(err) }
+    }
   })
 
   // The main conversation's turns drive the clock: it counts without a pause while one runs.
@@ -1312,8 +1666,21 @@ export const register: Register = (on, options) => {
           `on duty: ${onDuty ? `${gerbilOf(s, onDuty).name} (${onDuty.name})${v.told === v.called ? '' : ', Claude not told yet'}` : 'nobody'}`,
           `this session: ${s.sessions.find(x => x.isSelf)?.title ?? '(not read yet)'}; clock ${fmtSpan(clockMs(c, await $.clock.now(), idleMs()))}${c.isTurnRunning ? ', a turn running' : ''}; statuses ${v.autoStatus ? 'guessed for you' : 'yours only'}`,
           `errors: ${s.errors.join('; ') || 'none'}`,
+          `note: ${s.hint ?? 'none'}`,
         ]
         return { text: lines.join('\n') }
+      }
+      case 'feed': {
+        // The app's data as Claude (or you) got it, where auto mode stops the mod asking: a JSON object.
+        const json = jsonOf(e.args.trim().slice('feed'.length))
+        if (!json || typeof json !== 'object' || Array.isArray(json)) {
+          return { text: 'Usage: /overview feed {"sessions": [...], "self": {...}, "scheduled_tasks": [...]}' }
+        }
+        try {
+          return { text: await feed($, json as Record<string, unknown>) }
+        } catch (err) {
+          return { text: errorMessage(err) }
+        }
       }
       case 'clan': {
         // Every project's gerbil.
@@ -1368,7 +1735,7 @@ export const register: Register = (on, options) => {
       }
       default:
         return {
-          text: `Unknown "${verb}". Use open, refresh, all, dump, status <status> [session], auto [on|off], done <id>, backdate <id>, clan or gerbil.`,
+          text: `Unknown "${verb}". Use open, refresh, all, dump, status <status> [session], auto [on|off], done <id>, backdate <id>, clan, gerbil or feed <json>.`,
         }
     }
   })

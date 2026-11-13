@@ -1,8 +1,19 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { calledGerbil, environmentNote, isWithin } from './call'
-import { coatById, findCoat } from './coats'
-import { EMPTY_RECORD, beatClock, clockMs, findSession, firstPromptTitle, fmtSpan, rollup, withStatus } from './data'
+import { calledGerbil, environmentNote, feedNote, gerbilProposalNote, isWithin } from './call'
+import { COATS, assignGerbils, coatById, findCoat, freeCoat, parseGerbilMap } from './coats'
+import {
+  EMPTY_RECORD,
+  beatClock,
+  clockMs,
+  findSession,
+  firstPromptTitle,
+  fmtSpan,
+  isAutoModeRefusal,
+  rollup,
+  withStatus,
+} from './data'
 import { gerbilSvg } from './gerbil-svg'
+import { buildNamePrompt, parseName, placeholderName } from './naming'
 
 // Runs under `claude plugin test <mod folder>`. The installed 2.1.132 CLI has no
 // `plugin test`; the desktop app's bundled engine does:
@@ -114,9 +125,15 @@ function standForTheApp(
     self?: Record<string, unknown>
     selfAfterMs?: number
     messages?: { role: 'user' | 'assistant'; text: string }[]
+    // What the model answers when asked to name a gerbil; null: no answer (the call cut off).
+    gerbilName?: string | null
+    // Claude Desktop in auto mode: every MCP call the mod makes itself is refused.
+    isAutoMode?: boolean
   } = {},
 ) {
+  const named: string[] = []
   on('env.get', (_, e) => ({ value: env[e.name] }))
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__project-overview__${e.name}` } }))
   on('tool.list', () => ({ value: tools.map(name => ({ name, description: '', mcp: true })) }))
   on('command.register', () => ({ value: { command: 'overview' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -141,6 +158,12 @@ function standForTheApp(
     return { value: undefined }
   })
   on('mcp.call', async (_, e) => {
+    if (own.isAutoMode) {
+      const refusal = `PreToolUse:mcp__${e.server}__${e.tool} hook error: Not run: in auto mode Claude Desktop doesn’t run this tool when a plugin’s own code calls it. Have Claude make the call.`
+      // As an error result. (The app may also reject the call with the same words, which
+      // the mod reads the same way; a test hook that throws is skipped, so it cannot show that.)
+      return { value: { content: [{ type: 'text', text: refusal }], isError: true } }
+    }
     switch (e.tool) {
       case 'list_sessions':
         return mcpAnswer(JSON.stringify(SESSIONS))
@@ -186,19 +209,26 @@ function standForTheApp(
       ? [{ name: 'issues.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }]
       : [],
   }))
-  on('model.complete', () => ({
-    value: {
-      isAnswered: true,
-      text: '{"synopsis": "Plot the TRM score on the matrix", "hours": 1.5, "status": "wip"}',
-      usage: {
-        input_tokens: 10,
-        output_tokens: 10,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+  const usage = { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  on('model.complete', (_, e) => {
+    if (/robotic gerbil/.test(String(e.system ?? ''))) {
+      named.push(String(e.prompt))
+      return {
+        value:
+          own.gerbilName === null
+            ? { isAnswered: false, reason: 'aborted', usage }
+            : { isAnswered: true, text: JSON.stringify({ name: own.gerbilName ?? 'Rivet' }), usage },
+      }
+    }
+    return {
+      value: {
+        isAnswered: true,
+        text: '{"synopsis": "Plot the TRM score on the matrix", "hours": 1.5, "status": "wip"}',
+        usage,
       },
-    },
-  }))
-  return { clock, store }
+    }
+  })
+  return { clock, store, named }
 }
 
 const typed = (text: string) => ({ text, wait: false, origin: { kind: 'composer' } }) as const
@@ -764,4 +794,165 @@ test('a picked status is kept, done stamps the day, auto hands it back; a sessio
     { role: 'user', text: '\n  fix the login page\nplease' },
   ]
   expect(firstPromptTitle(said)).toBe('fix the login page')
+})
+
+// A project the gerbils setting does not name: it is new to the clan.
+const NEW = 'C:\\Users\\amyjm\\RiderProjects\\tidewater'
+const SET_GERBIL = 'mcp__project-overview__set_gerbil'
+const FEED = 'mcp__project-overview__feed'
+// The coats the setting's default already gives out.
+const WORN = ['argente-golden', 'agouti', 'black', 'burmese', 'dove', 'lilac', 'cream', 'bew', 'slate', 'pied']
+const tidewater = (store: Record<string, unknown>) =>
+  Object.entries(store.gerbils as Record<string, { name: string; coat: string; source: string; proposal?: string }>).find(([key]) =>
+    key.endsWith('tidewater'),
+  )?.[1]
+
+test('a new gerbil gets a coat no project wears, at random, and its folder name until the model names it', async () => {
+  const all = COATS.map(c => c.id)
+  expect(freeCoat(all.filter(id => id !== 'nutmeg'), () => 0.99)).toBe('nutmeg')
+  // Every coat worn: any coat, shared.
+  expect(all).toContain(freeCoat(all, () => 0.5))
+  const set = parseGerbilMap('bragi=Skald/burmese')
+  const g = assignGerbils([{ key: 'k/bragi', name: 'bragi' }, { key: 'k/tidewater', name: 'tidewater' }], {}, set, () => 0)
+  expect(g['k/bragi']).toEqual({ name: 'Skald', coat: 'burmese', source: 'config' })
+  expect(g['k/tidewater']).toEqual({ name: 'Tidewater', coat: 'agouti', source: 'auto', proposal: 'naming' })
+  // What the user picked wins over the setting; a suggestion kept is kept, proposal and all.
+  const stored = {
+    'k/bragi': { name: 'Bea', coat: 'dove', source: 'manual' as const },
+    'k/tidewater': { name: 'Rivet', coat: 'nutmeg', source: 'auto' as const, proposal: 'named' as const },
+  }
+  const kept = assignGerbils([{ key: 'k/bragi', name: 'bragi' }, { key: 'k/tidewater', name: 'tidewater' }], stored, set)
+  expect(kept['k/bragi']).toEqual(stored['k/bragi'])
+  expect(kept['k/tidewater']).toEqual(stored['k/tidewater'])
+})
+
+test("the model's name is one fresh word; the prompt carries the project and the names taken", async () => {
+  expect(parseName('{"name": "rivet"}', [])).toBe('Rivet')
+  expect(parseName('Rivet', [])).toBe('Rivet')
+  expect(parseName('{"name": "Hazel"}', ['hazel'])).toBeNull()
+  expect(parseName('{"name": "Two words"}', [])).toBeNull()
+  expect(parseName('Sure! How about Rivet?', [])).toBeNull()
+  expect(parseName('{"name": "Tidewater"}', [], 'tidewater')).toBeNull()
+  expect(placeholderName('butterfield_rrt')).toBe('Butterfield')
+  const prompt = buildNamePrompt({ folder: 'tidewater', about: '# Tidewater\nTide tables.', titles: ['Fix the tide chart'], taken: ['Scout', 'Digger'] })
+  expect(prompt).toMatch(/Project folder: tidewater/)
+  expect(prompt).toMatch(/Tide tables/)
+  expect(prompt).toMatch(/- Fix the tide chart/)
+  expect(prompt).toMatch(/do not use\): Scout, Digger/)
+})
+
+test("a new project's gerbil is suggested and put to the user once; their answer is kept as theirs", async ($, on) => {
+  const { store, named } = standForTheApp(on, [], NEW, {}, '[]', undefined, { gerbilName: 'Rivet' })
+  await $.session.start({ cwd: NEW, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // The model was asked once, with the folder and the names already taken.
+  expect(named).toHaveLength(1)
+  expect(named[0]).toMatch(/Project folder: tidewater/)
+  expect(named[0]).toMatch(/Butterscotch/)
+  const suggested = tidewater(store)!
+  expect(suggested.name).toBe('Rivet')
+  expect(WORN).not.toContain(suggested.coat)
+  expect((await ui.find({ type: 'Text', text: /^Rivet$/ }))?.text).toBe('Rivet')
+
+  // The first prompt carries the question for Claude to put to the user.
+  const sent = await $.prompt.submit(typed('set up the tide tables'))
+  expect(sent.text).toBe('set up the tide tables')
+  expect(sent.context).toHaveLength(1)
+  expect(sent.context?.[0]).toContain(`"Meet Rivet, a ${coatById(suggested.coat).label} gerbil for this project. Keep, or give me a name and colour?"`)
+  expect(sent.context?.[0]).toContain(SET_GERBIL)
+  // Asked once: the suggestion now stands as it is, and the next prompt carries nothing.
+  expect(tidewater(store)).toEqual({ name: 'Rivet', coat: suggested.coat, source: 'auto' })
+  expect((await $.prompt.submit(typed('keep going'))).context).toBeUndefined()
+
+  // The user answers; Claude saves it as their pick, kept over everything.
+  const saved = await $.tool.call({ tool: SET_GERBIL, name: 'Tide', coat: 'polar fox', confirmed: true })
+  expect(String(saved.result)).toMatch(/Tide, the polar fox gerbil, is PM for tidewater, as the user chose/)
+  expect(tidewater(store)).toEqual({ name: 'Tide', coat: 'polar-fox', source: 'manual' })
+  expect((await ui.find({ type: 'Text', text: /^Tide$/ }))?.text).toBe('Tide')
+  // A colour the mod does not know is refused, naming the coats.
+  const wrong = await $.tool.call({ tool: SET_GERBIL, coat: 'tartan' })
+  expect(wrong.result).toBeUndefined()
+  expect(tidewater(store)?.coat).toBe('polar-fox')
+  await ui.unmount()
+})
+
+test('where the model gives no name, Claude is asked to think of one', async ($, on) => {
+  const { store } = standForTheApp(on, [], NEW, {}, '[]', undefined, { gerbilName: null })
+  await $.session.start({ cwd: NEW, surface: 'desktop', isInteractive: true })
+
+  const sent = await $.prompt.submit(typed('set up the tide tables'))
+  expect(sent.context?.[0]).toMatch(/could not ask a model for a name/)
+  expect(sent.context?.[0]).toMatch(/"confirmed": false/)
+  expect(sent.context?.[0]).toMatch(/already taken\): .*Butterscotch/)
+  // Meanwhile it goes by its folder's name.
+  expect(tidewater(store)).toEqual(expect.objectContaining({ name: 'Tidewater', source: 'auto' }))
+  // Claude saves its own suggestion as one, not as the user's pick.
+  await $.tool.call({ tool: SET_GERBIL, name: 'Ebb', confirmed: false })
+  expect(tidewater(store)).toEqual(expect.objectContaining({ name: 'Ebb', source: 'auto' }))
+})
+
+test('with nobody to ask (a scheduled run), the suggestion stands without a question', async ($, on) => {
+  const { store } = standForTheApp(on, [], NEW, {}, '[]', undefined, { gerbilName: 'Rivet' })
+  await $.session.start({ cwd: NEW, surface: 'desktop', isInteractive: true })
+
+  const run = await $.prompt.submit({ text: 'nightly tide check', wait: false, origin: { kind: 'scheduled-trigger' } } as never)
+  expect(run.context).toBeUndefined()
+  expect(tidewater(store)).toEqual(expect.objectContaining({ name: 'Rivet', source: 'auto' }))
+  expect(tidewater(store)?.proposal).toBeUndefined()
+  // Settled: a later prompt asks nothing either.
+  expect((await $.prompt.submit(typed('what did the run find?'))).context).toBeUndefined()
+})
+
+test("Claude Desktop's auto-mode refusal is recognised, and only that", async () => {
+  const text = "PreToolUse:mcp__ccd_session_mgmt__get_session hook error: Not run: in auto mode Claude Desktop doesn't run this tool when a plugin's own code calls it. Have Claude make the call."
+  expect(isAutoModeRefusal(text)).toBe(true)
+  expect(isAutoModeRefusal(text.replace(/'/g, '\u2019'))).toBe(true)
+  expect(isAutoModeRefusal('refused: The server-side auto mode classifier gave no verdict')).toBe(false)
+  const note = feedNote({ hasTasks: false })
+  expect(note).toMatch(/list_sessions/)
+  expect(note).not.toMatch(/list_scheduled_tasks/)
+  const ask = gerbilProposalNote({ project: 'p', name: 'Rivet', coat: 'nutmeg', coatLabel: 'nutmeg', isUnnamed: false, taken: [], coats: ['nutmeg'] })
+  expect(ask).toMatch(/Meet Rivet, a nutmeg gerbil for this project/)
+})
+
+test('in auto mode the refused calls are no error: Claude is asked for the data, and what it hands over is shown', async ($, on) => {
+  standForTheApp(on, [], CWD, {}, '[]', undefined, { isAutoMode: true })
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // Nothing read, nothing red: the foot of the pane says where the data will come from.
+  const before = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(before.text).toMatch(/errors: none/)
+  expect(before.text).toMatch(/note: auto mode: data comes from Claude, asked for with your next message/)
+  expect(await ui.find({ type: 'Text', text: /auto mode: data comes from Claude/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /allow mcp__ccd_session_mgmt__get_session/ })).toBeUndefined()
+  expect(await ui.find({ key: 'done:local_a' })).toBeUndefined()
+
+  // The next prompt asks Claude to make the calls and hand the answers over; once, not every prompt.
+  const sent = await $.prompt.submit(typed('plot the TRM score'))
+  expect(sent.context).toHaveLength(1)
+  for (const want of ['list_sessions', 'get_session', 'list_scheduled_tasks', FEED]) expect(sent.context?.[0]).toContain(want)
+  expect((await $.prompt.submit(typed('and the legend'))).context).toBeUndefined()
+
+  // Claude hands over what the app answered it, as text.
+  const fed = await $.tool.call({
+    tool: FEED,
+    sessions: JSON.stringify(SESSIONS),
+    self: JSON.stringify(ME),
+    scheduled_tasks: 'No scheduled tasks found. Use create_scheduled_task to add one.',
+  })
+  expect(String(fed.result)).toMatch(/3 sessions, this session and 0 scheduled tasks/)
+  await $.command.run({ command: 'overview', args: 'refresh' })
+  expect(await ui.find({ key: 'done:local_a' })).toBeDefined()
+  expect(await ui.find({ text: /^Gerbil mod improvements$/ })).toBeDefined()
+  const after = await $.command.run({ command: 'overview', args: 'dump' })
+  expect(after.text).toMatch(/errors: none/)
+  expect(after.text).toMatch(/note: auto mode: data comes from Claude, last handed over at \d\d:\d\d/)
+
+  // The same by command, and a usage line for what is not JSON.
+  expect((await $.command.run({ command: 'overview', args: 'feed nonsense' })).text).toMatch(/^Usage: \/overview feed/)
+  const typedFeed = await $.command.run({ command: 'overview', args: `feed {"sessions": ${JSON.stringify(SESSIONS.slice(0, 1))}}` })
+  expect(typedFeed.text).toMatch(/1 sessions/)
+  await ui.unmount()
 })

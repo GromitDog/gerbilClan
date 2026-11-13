@@ -115,12 +115,20 @@ export type OverviewSnapshot = {
 /**
  * A project's gerbil: its name and coat (an id from hooks/coats.ts). `manual`:
  * picked in the pane or by command, and kept; `config`: from the `gerbils`
- * setting; `auto`: dealt out when the project first appeared.
+ * setting; `auto`: suggested when the project first appeared (a name from the
+ * model, a coat no other project has), kept until changed.
  */
 export type OverviewGerbil = {
   name: string
   coat: string
   source: 'manual' | 'config' | 'auto'
+  /**
+   * A suggestion not yet put to the person, asked about once, with the first
+   * prompt in the project: `naming` while the model has not been asked (the
+   * name is the folder's), `named` once it has, `unnamed` where it could not
+   * be (Claude then thinks of the name). Absent once settled.
+   */
+  proposal?: 'naming' | 'named' | 'unnamed'
 }
 
 export type OverviewView = {

@@ -1,8 +1,10 @@
 // Each project has its own gerbil: a name, and a coat after the colours gerbil
 // breeders name. The drawing takes its colours from the coat; the names and
-// coats come from the `gerbils` setting, or from what Amy picks in the pane,
-// or are dealt out (no two projects alike) and then kept.
+// coats come from the `gerbils` setting, or from what Amy picks, or are
+// suggested for a new project (a name from the model, a free coat at random)
+// and then kept.
 import type { OverviewGerbil } from '../types'
+import { placeholderName } from './naming'
 
 export type Coat = {
   id: string
@@ -132,12 +134,6 @@ export function findCoat(text: string): Coat | undefined {
   return COATS.find(c => c.id === id || c.label.toLowerCase().replace(/\s+/g, '-') === k)
 }
 
-/** Names dealt to a project the setting does not name, in this order from a start its folder picks. */
-const NAMES = [
-  'Pip', 'Sprocket', 'Biscuit', 'Widget', 'Hazel', 'Rivet', 'Toffee', 'Gizmo', 'Clover',
-  'Bramble', 'Sesame', 'Cog', 'Juniper', 'Pepper', 'Fennel', 'Quill', 'Maple', 'Bolt',
-]
-
 /** Amy's projects as first named: folder=Name/coat, comma-separated. */
 export const DEFAULT_GERBILS =
   'butterfield_rrt=Butterscotch/argente-golden, rat=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, ' +
@@ -163,33 +159,37 @@ export function parseGerbilMap(text: string): Record<string, GerbilSetting> {
   return out
 }
 
-function hash(text: string): number {
-  let h = 0
-  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) >>> 0
-  return h
-}
-
-function pick<T>(list: readonly T[], start: number, free: (x: T) => boolean): T {
-  for (let i = 0; i < list.length; i++) {
-    const x = list[(start + i) % list.length]!
-    if (free(x)) return x
-  }
-  return list[start % list.length]!
+/**
+ * A coat at random from those no project wears; once every coat is worn, any
+ * coat at random (two projects may then share one). `random` is `Math.random`'s
+ * shape, so a test can fix it.
+ */
+export function freeCoat(worn: Iterable<string>, random: () => number = Math.random): string {
+  const taken = new Set(worn)
+  const free = COATS.filter(c => !taken.has(c.id))
+  const from = free.length ? free : COATS
+  return from[Math.min(from.length - 1, Math.floor(random() * from.length))]!.id
 }
 
 /**
- * Every project's gerbil. What Amy picked in the pane wins, then the setting,
- * then what was dealt before; a project with none is dealt a coat and a name
- * no other project has, starting from a place its folder picks.
+ * Every project's gerbil. What Amy picked (in the pane, by command, or by
+ * answering Claude) wins, then the setting, then what was suggested before. A
+ * project with none gets a suggestion: a coat at random that no other project
+ * wears, and for now its folder's name, marked `proposal: 'naming'` until the
+ * model has been asked for a real one (register.tsx asks).
  */
 export function assignGerbils(
   projects: readonly { key: string; name: string }[],
   stored: Readonly<Record<string, OverviewGerbil>>,
   configured: Readonly<Record<string, GerbilSetting>>,
+  random: () => number = Math.random,
 ): Record<string, OverviewGerbil> {
   const out: Record<string, OverviewGerbil> = {}
-  const coats = new Set<string>()
-  const names = new Set<string>()
+  // Coats worn anywhere in the clan, projects not seen lately and the setting's included.
+  const coats = new Set<string>([
+    ...Object.values(stored).map(g => g.coat),
+    ...Object.values(configured).map(g => g.coat ?? ''),
+  ].filter(Boolean))
   const pending: { key: string; name: string }[] = []
   for (const p of projects) {
     const kept = stored[p.key]
@@ -205,18 +205,16 @@ export function assignGerbils(
     if (g) {
       out[p.key] = g
       if (g.coat) coats.add(g.coat)
-      if (g.name) names.add(g.name.toLowerCase())
     }
     if (!g?.name || !g.coat) pending.push(p)
   }
   for (const p of pending) {
-    const g: OverviewGerbil = out[p.key] ?? { name: '', coat: '', source: 'auto' }
-    const start = hash(p.key)
-    const coat = g.coat || pick(COATS.map(c => c.id), start, id => !coats.has(id))
-    const name = g.name || pick(NAMES, start, n => !names.has(n.toLowerCase()))
+    const g = out[p.key]
+    const coat = g?.coat || freeCoat(coats, random)
     coats.add(coat)
-    names.add(name.toLowerCase())
-    out[p.key] = { ...g, name, coat }
+    out[p.key] = g
+      ? { ...g, coat, name: g.name || placeholderName(p.name) }
+      : { name: placeholderName(p.name), coat, source: 'auto', proposal: 'naming' }
   }
   return out
 }

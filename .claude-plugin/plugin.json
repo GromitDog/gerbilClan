@@ -55,7 +55,7 @@
     "gerbils": {
       "type": "string",
       "title": "Gerbil clan",
-      "description": "The clan: each project's gerbil PM, as folder=Name/coat pairs separated by commas (no-folder for the No folder sessions). Coats: agouti, black, argente-golden, cream, bew, dove, lilac, burmese, siamese, slate, nutmeg, honey, polar-fox, and the pied ones: pied, mottled-black, pied-agouti, pied-argente, pied-lilac, pied-burmese. A project left out is dealt a name and a coat no other project has; one renamed or recoloured in the pane keeps what was picked.",
+      "description": "The clan: each project's gerbil PM, as folder=Name/coat pairs separated by commas (no-folder for the No folder sessions). Coats: agouti, black, argente-golden, cream, bew, dove, lilac, burmese, siamese, slate, nutmeg, honey, polar-fox, and the pied ones: pied, mottled-black, pied-agouti, pied-argente, pied-lilac, pied-burmese. A project left out gets a suggestion (a name from the model, a coat at random that no other project wears) that Claude puts to you with your first message there; one renamed or recoloured in the pane, or by telling Claude, keeps what was picked.",
       "default": "butterfield_rrt=Butterscotch/argente-golden, rat=Butterscotch/argente-golden, seeker=Scout/agouti, SeekerScrapers=Digger/black, bragi=Skald/burmese, databasemanager=Ledger/dove, teamManagement=Roster/lilac, GUMS=Gumdrop/cream, tinkerbell=Pixie/bew, project-overview=Alpha/slate, no-folder=Nomad/pied"
     },
     "idleMinutes": {

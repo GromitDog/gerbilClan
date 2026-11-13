@@ -116,3 +116,74 @@ export function environmentNote(call: EnvironmentCall): string {
     tail,
   ].join(' ')
 }
+
+/** The mod's own tools, as Claude calls them (registered in register.tsx). */
+export const TOOL_SET_GERBIL = 'mcp__project-overview__set_gerbil'
+export const TOOL_FEED = 'mcp__project-overview__feed'
+
+export type GerbilProposal = {
+  /** The project's name (its folder). */
+  project: string
+  /** The suggested name; ignored when `isUnnamed`. */
+  name: string
+  /** The coat's id, and its label as a breeder says it. */
+  coat: string
+  coatLabel: string
+  /** The model could not be asked for a name: Claude thinks of one. */
+  isUnnamed: boolean
+  /** Names already in the clan, which a new one must not repeat. */
+  taken: readonly string[]
+  /** Every coat id, for an answer that names a colour. */
+  coats: readonly string[]
+}
+
+/**
+ * What Claude reads beside the first prompt in a project whose gerbil was only
+ * suggested: show the suggestion, and save the person's answer as their pick.
+ * Sent once; with nobody at the prompt it is not sent and the suggestion stands.
+ */
+export function gerbilProposalNote(p: GerbilProposal): string {
+  const save = `the ${TOOL_SET_GERBIL} tool (load it through ToolSearch if it is deferred)`
+  const name = p.isUnnamed ? '<name>' : p.name
+  const ask = `"Meet ${name}, a ${p.coatLabel} gerbil for this project. Keep, or give me a name and colour?"`
+  return [
+    `[project-overview] The project "${p.project}" is new to the user's project overview pane, and its gerbil PM is only a suggestion so far.`,
+    p.isUnnamed
+      ? [
+          `The mod picked a ${p.coatLabel} coat (${p.coat}) but could not ask a model for a name, so think of one yourself from what you know of the project:`,
+          `one short, friendly word, not the folder's own name, and none of these (already taken): ${p.taken.join(', ') || 'none'}.`,
+          `Save it straight away with ${save}: {"name": "<name>", "coat": "${p.coat}", "confirmed": false}.`,
+        ].join(' ')
+      : `The suggestion: ${p.name}, a ${p.coatLabel} gerbil (coat id ${p.coat}).`,
+    `In one line at the start of your reply, put it to the user: ${ask}`,
+    `Then do what they asked as usual; the question is not part of the task.`,
+    `When they answer it (now or in a later message), save their choice with ${save}:`,
+    `{"name": ..., "coat": ..., "confirmed": true}; keeping it means saving the suggestion as it is.`,
+    `A colour they name is matched to a coat id (${p.coats.join(', ')}); a plain colour such as "white" or "grey" may be said as the nearest coat.`,
+    `If they do not answer it, leave it: the suggestion stands, and they can change it in the pane at any time.`,
+  ].join(' ')
+}
+
+export type FeedRequest = {
+  /** The tools this session has; one it lacks is left out of the ask. */
+  hasTasks: boolean
+}
+
+/**
+ * What Claude reads beside a prompt when auto mode has stopped the mod making
+ * the app's own calls: make them, and hand the answers to the mod.
+ */
+export function feedNote(r: FeedRequest): string {
+  const calls = [
+    `mcp__ccd_session_mgmt__list_sessions with {"limit": 40, "include_archived": true}`,
+    `mcp__ccd_session_mgmt__get_session with {"session_id": "self"}`,
+    ...(r.hasTasks ? [`mcp__scheduled-tasks__list_scheduled_tasks with {}`] : []),
+  ]
+  return [
+    `[project-overview] This session is in auto mode, where Claude Desktop does not let the project-overview mod call the app's session tools itself, so its pane waits on you for that data.`,
+    `As a quick side step (it is not part of the user's task and needs no mention unless it fails), call ${calls.join('; ')}`,
+    `(all read-only; load them through ToolSearch if they are deferred),`,
+    `then pass their answers, unchanged, to ${TOOL_FEED} as {"sessions": <list_sessions answer>, "self": <get_session answer>${r.hasTasks ? ', "scheduled_tasks": <list_scheduled_tasks answer>' : ''}}.`,
+    `Leave out any call that is refused or that this session does not have, and do not retry it.`,
+  ].join(' ')
+}

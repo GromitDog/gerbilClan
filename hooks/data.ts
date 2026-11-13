@@ -617,3 +617,32 @@ export function mcpText(result: { content: { type: string; text?: string }[] }):
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
+
+/**
+ * Claude Desktop in auto mode does not run an MCP tool that a plugin's own code
+ * calls ("Not run: in auto mode Claude Desktop doesn't run this tool when a
+ * plugin's own code calls it. Have Claude make the call."). That is a known
+ * limit, not a failure: the pane is then fed by Claude (see the `feed` tool).
+ * Also matches the mod's own shortened form of it, `refused in auto mode`.
+ */
+const AUTO_MODE_REFUSAL =
+  /in auto mode,? Claude Desktop (doesn.t|does not) run this tool when a plugin.s own code calls it|have Claude make the call|refused in auto mode/i
+
+export function isAutoModeRefusal(text: string): boolean {
+  return AUTO_MODE_REFUSAL.test(text)
+}
+
+/**
+ * JSON handed over as text or as a value: a string is parsed (from its first
+ * `[` or `{`), anything else is taken as it is. Undefined for text with no JSON.
+ */
+export function jsonOf(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const start = value.search(/[[{]/)
+  if (start < 0) return undefined
+  try {
+    return JSON.parse(value.slice(start))
+  } catch {
+    return undefined
+  }
+}

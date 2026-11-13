@@ -13,6 +13,7 @@ A pane for one project at a time, docked beside the chat: its sessions with a on
 - `/overview backdate <session id>` sets a done session's day to yesterday, to watch the rollover.
 - `/overview dump` prints what the pane holds, for checking without a screen.
 - `/overview clan` lists every project's gerbil; `/overview gerbil …` renames or recolours the selected one (see below).
+- `/overview feed {"sessions": […], "self": {…}, "scheduled_tasks": […]}` hands the pane the app's data by hand, in auto mode (see Permissions); Claude normally does this through the mod's `feed` tool.
 
 In the pane: the Clan card at the top picks the project by its gerbil (a project is a session's first folder under `projectsRoot`) and puts that gerbil on duty (see below); each row's status opens a picker, and the glyph before the title still cycles wip → blocked → planned; `done` and `edit` sit on each row; each open issue has a `done` button; the three dim buttons prefill the prompt with the regular asks (today's progress, weekly report, UAT overview). The Scheduled card shows only on a device that has scheduled tasks: with none, or with no scheduled-tasks server at all, it is left out and nothing is reported as an error.
 
@@ -29,7 +30,7 @@ The whole clan is in the Clan card for this: every folder under `projectsRoot` t
 
 ## This session
 
-The app's list of sessions leaves out the one asking, so the pane asks for it by itself (`get_session`, see Permissions) and shows it under its real name and id. Where that call is not allowed the row goes by the first line of the session's first prompt, and a line at the foot of the pane says what to allow.
+The app's list of sessions leaves out the one asking, so the pane asks for it by itself (`get_session`, see Permissions) and shows it under its real name and id. Where that call is not allowed the row goes by the first line of the session's first prompt, and a line at the foot of the pane says what to allow; in auto mode Claude hands it over instead.
 
 Its hours are a clock, not an estimate. The clock counts while a turn runs, and for `idleMinutes` (five) after the last sign of life, a prompt or a turn ending; then it pauses until the next one. The row shows the time to the minute and moves as it passes, with `live` beside it while it counts; `edit` on that row sets the clock, which counts on from what you typed. The time is written to the session's record, so other sessions' panes and the day's total show the same figure, and it is kept over the estimate's hours afterwards. Its synopsis is written from its own conversation after a turn, at most every five minutes. Once worked in, the session is `wip` unless you picked a status.
 
@@ -59,9 +60,10 @@ A project with no issues file may be on Jira. The `jiraProjects` setting names t
 
 Each project has its own gerbil PM, with a name and a coat after the colours breeders name: golden agouti, black, argente golden, argente cream, black-eyed white, dove, lilac, Burmese, Siamese, slate, nutmeg, dark-eyed honey and polar fox, and the pied ones: pied black, mottled black, pied golden agouti, pied argente golden, pied lilac and pied Burmese. Red-eyed coats wear ruby goggles; Burmese and Siamese have darker points; pied coats have a white blaze and spots, mottled ones more. An agouti-type coat (golden agouti, argente, nutmeg, honey, polar fox) shows its lighter underside as a tummy; a self colour (black, slate, lilac, dove, Burmese, Siamese, and the pied forms of black, lilac and Burmese) has an underside as dark as its back, so it has none. All of them together are the clan: the Clan card at the top of the pane shows every project's gerbil in its current mood, and picking one selects its project: it is how the pane switches projects. The speech bubble shows the gerbil's name and mood; its coat shows only in the picker.
 
-- The `gerbils` setting names them, as `folder=Name/coat` pairs (`no-folder` for the No folder sessions). A project it leaves out is dealt a name and a coat no other project has, and keeps them.
-- `edit` beside the gerbil's name opens a name field and a coat picker; what is picked there is kept over the setting.
-- `/overview clan` lists the clan; `/overview gerbil` names the selected project's gerbil; `/overview gerbil name <Name>` and `/overview gerbil coat <coat>` change it (`/overview gerbil coats` lists the coats); `/overview gerbil reset` hands it back to the setting.
+- The `gerbils` setting names them, as `folder=Name/coat` pairs (`no-folder` for the No folder sessions).
+- A project it leaves out gets a suggestion: a coat at random from those no other project wears (any coat, shared, once all are worn), and a name the model (Haiku, by the same route as the session estimates) thinks of from the folder's name, the start of its README.md or CLAUDE.md, its recent session titles and the names already taken. Until the model answers it goes by its folder's name. With the first message you send in that project, Claude shows it to you ("Meet Rivet, a nutmeg gerbil for this project. Keep, or give me a name and colour?") and saves your answer as your pick, through the mod's `set_gerbil` tool. You are asked once: answer or not, the suggestion stands until you change it. A scheduled run asks nobody and keeps the suggestion. Where the model could not be asked, Claude thinks of the name itself.
+- `edit` beside the gerbil's name opens a name field and a coat picker; what is picked there, or told to Claude, is kept over the setting.
+- `/overview clan` lists the clan; `/overview gerbil` names the selected project's gerbil; `/overview gerbil name <Name>` and `/overview gerbil coat <coat>` change it (`/overview gerbil coats` lists the coats); `/overview gerbil reset` hands it back to the setting, or, for a project the setting leaves out, has a new one suggested and put to you.
 
 ## Loading it in every session
 
@@ -83,7 +85,22 @@ A session the desktop app starts reads the folder when it starts and does not wa
 
 ## Permissions
 
-The pane reads sessions and scheduled tasks through the app's own MCP servers. In a session in auto mode those calls are made by a timer, not by a model request, so the auto-mode classifier has no verdict and refuses them. Allow the read-only tools in `~/.claude/settings.json`:
+The pane reads sessions, scheduled tasks, transcripts and the Jira sprint through MCP servers, calling them from the mod's own code (a timer, a click), not from a request of Claude's.
+
+### Auto mode
+
+In a session in auto mode, Claude Desktop does not run any MCP tool that a plugin's own code calls: the call comes back `Not run: in auto mode Claude Desktop doesn't run this tool when a plugin's own code calls it. Have Claude make the call.` Allow rules do not change that, so in auto mode:
+
+- The refusal is not an error. The foot of the pane says `auto mode: data comes from Claude`, with the time Claude last handed it over.
+- Beside your next message (then at most every 15 minutes), Claude is asked to make the read-only calls itself, `list_sessions`, `get_session` (`self`) and `list_scheduled_tasks`, and to pass the answers to the mod's `feed` tool (`mcp__project-overview__feed`). The pane shows what was handed over; the session list is kept across sessions, so another auto-mode session starts from it.
+- What Claude is not asked for is missing: the synopsis and hours estimates of other sessions (they need their transcripts), scheduled tasks' last runs, and the Jira sprint. This session's own synopsis and clock still work: they need no MCP call.
+- Archiving on "done" is refused too; the session is still marked done.
+
+Claude's own calls to these tools are judged like any of its tool calls in auto mode.
+
+### Default mode
+
+In a default-mode session the app asks before each call the mod makes, unless it is allowed. Allow the read-only tools in `~/.claude/settings.json` so the pane reads them without asking:
 
 ```json
 { "permissions": { "allow": [
@@ -98,6 +115,8 @@ The pane reads sessions and scheduled tasks through the app's own MCP servers. I
 
 `get_session` is how the pane learns this session's own name and id (the list leaves the asking session out); without it the row goes by its first prompt's words, and what you set on it is kept under an id other sessions' panes do not know. The last one is the Atlassian connector's search, read-only, needed for the sprint summary; its server key is the `jiraServer` setting.
 
-A gerbil called from a session that is somewhere else has Claude move the session with the app's `change_directory` tool. In auto mode the classifier can refuse that move ("judged this action dangerous"), and Claude then reads what it can by absolute path and says so. `"mcp__ccd_directory__change_directory"` in the same `allow` list lets the move through; it does so for every session and every folder, with no check on the move itself (what Claude then does in the folder is still checked), so it is yours to decide.
+Archiving a session on "done" (`archive_session`) is not in that list, so the app asks; add `"mcp__ccd_session_mgmt__archive_session"` to archive without asking. The call is only ever made from your own click or `/overview done`, and an archived session can be unarchived. None of these rules helps in auto mode (above).
 
-Archiving a session on "done" (`archive_session`) is not in that list: in a default-mode session the app asks; in auto mode it is refused and the pane says so, with the session still marked done. To let the done button archive in auto mode too, add `"mcp__ccd_session_mgmt__archive_session"` to the same `allow` list. The call is only ever made from your own click or `/overview done`, and an archived session can be unarchived.
+### Claude's own calls
+
+A gerbil called from a session that is somewhere else has Claude move the session with the app's `change_directory` tool. That is Claude's call, not the mod's, so in auto mode the classifier judges it and can refuse it ("judged this action dangerous"); Claude then reads what it can by absolute path and says so. `"mcp__ccd_directory__change_directory"` in the `allow` list lets the move through; it does so for every session and every folder, with no check on the move itself (what Claude then does in the folder is still checked), so it is yours to decide. The same holds for the calls Claude makes to feed the pane and for the mod's own `set_gerbil` and `feed` tools.
